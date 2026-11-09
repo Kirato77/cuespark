@@ -195,6 +195,82 @@ impl Project {
     pub fn first_playable(&self, has_clip: impl Fn(CueId) -> bool) -> Option<CueId> {
         (0..CUE_COUNT).find(|&c| has_clip(c))
     }
+
+    /// Copy every cue's audio outside the show folder into `<show dir>/Audio`, so the folder
+    /// alone is the whole show. Returns how many files were copied and what failed.
+    pub fn collect(&mut self, show_dir: &Path) -> (usize, Vec<String>) {
+        let target = show_dir.join("Audio");
+        let mut copied: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut failures = Vec::new();
+        for cue in self.cues.iter_mut().filter(|c| !c.path.is_empty()) {
+            let src = PathBuf::from(&cue.path);
+            if src.starts_with(show_dir) {
+                continue;
+            }
+            if let Some((_, dst)) = copied.iter().find(|(s, _)| *s == src) {
+                cue.path = dst.to_string_lossy().into_owned();
+                continue;
+            }
+            let result = std::fs::create_dir_all(&target).and_then(|_| {
+                let dst = free_name(&target, &src);
+                std::fs::copy(&src, &dst).map(|_| dst)
+            });
+            match result {
+                Ok(dst) => {
+                    cue.path = dst.to_string_lossy().into_owned();
+                    copied.push((src, dst));
+                }
+                Err(e) => failures.push(format!("{}: {e}", src.display())),
+            }
+        }
+        (copied.len(), failures)
+    }
+
+    /// Point cues whose file is gone to a file with the same name somewhere under `folder`.
+    /// Returns (found, still missing).
+    pub fn relink(&mut self, folder: &Path) -> (usize, usize) {
+        let mut index = std::collections::HashMap::new();
+        index_files(folder, 0, &mut index);
+        let (mut found, mut missing) = (0, 0);
+        for cue in self.cues.iter_mut().filter(|c| !c.path.is_empty() && !Path::new(&c.path).exists()) {
+            let name = Path::new(&cue.path.replace('\\', "/")).file_name().map(|n| n.to_string_lossy().to_lowercase());
+            match name.and_then(|n| index.get(&n)) {
+                Some(p) => {
+                    cue.path = p.to_string_lossy().into_owned();
+                    found += 1;
+                }
+                None => missing += 1,
+            }
+        }
+        (found, missing)
+    }
+}
+
+/// `dir/name.ext`, or `dir/name (2).ext` if that name is taken by another file.
+fn free_name(dir: &Path, src: &Path) -> PathBuf {
+    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "audio".into());
+    let first = dir.join(&name);
+    if !first.exists() {
+        return first;
+    }
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    (2..).map(|i| dir.join(format!("{stem} ({i}){ext}"))).find(|p| !p.exists()).unwrap()
+}
+
+/// File name (lowercase) -> path, a few folders deep; first match wins.
+fn index_files(dir: &Path, depth: usize, index: &mut std::collections::HashMap<String, PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth < 6 {
+                index_files(&p, depth + 1, index);
+            }
+        } else if let Some(n) = p.file_name() {
+            index.entry(n.to_string_lossy().to_lowercase()).or_insert(p);
+        }
+    }
 }
 
 /// Resolve a stored path. Shows move between machines (D:\ vs C:\, Windows vs Linux),
@@ -309,6 +385,33 @@ mod tests {
         assert_eq!(next_start(at(9, 20, 0), "20:00"), Some(at(10, 20, 0)), "exactly now -> tomorrow");
         assert_eq!(next_start(at(9, 21, 30), "20:00"), Some(at(10, 20, 0)));
         assert_eq!(next_start(at(9, 19, 0), "nope"), None);
+    }
+
+    #[test]
+    fn collect_and_relink() {
+        let root = std::env::temp_dir().join(format!("cuespark-collect-{}", std::process::id()));
+        let (show, elsewhere) = (root.join("show"), root.join("elsewhere"));
+        std::fs::create_dir_all(&show).unwrap();
+        std::fs::create_dir_all(elsewhere.join("a")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("b")).unwrap();
+        std::fs::write(elsewhere.join("a/hit.wav"), b"one").unwrap();
+        std::fs::write(elsewhere.join("b/hit.wav"), b"two").unwrap(); // same name, other file
+        let mut p = Project::default();
+        p.cues[0].path = elsewhere.join("a/hit.wav").to_string_lossy().into_owned();
+        p.cues[1].path = elsewhere.join("b/hit.wav").to_string_lossy().into_owned();
+        p.cues[2].path = p.cues[0].path.clone(); // reused file is copied once
+        let (copied, failures) = p.collect(&show);
+        assert_eq!((copied, failures.len()), (2, 0));
+        assert_eq!(std::fs::read(show.join("Audio/hit.wav")).unwrap(), b"one");
+        assert_eq!(std::fs::read(show.join("Audio/hit (2).wav")).unwrap(), b"two");
+        assert_eq!(p.cues[2].path, p.cues[0].path);
+
+        let mut q = Project::default();
+        q.cues[0].path = "D:\\old\\HIT.wav".into();
+        q.cues[1].path = "/gone/nothing.wav".into();
+        assert_eq!(q.relink(&elsewhere), (1, 1));
+        assert!(q.cues[0].path.ends_with("hit.wav"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

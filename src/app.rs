@@ -175,6 +175,10 @@ pub struct App {
     meter: (f32, f32),
     /// Which waveform marker the mouse is dragging: true = out point.
     drag_out: bool,
+    undo: Vec<Project>,
+    redo: Vec<Project>,
+    /// Edits closer together than this become one undo step (typing a name).
+    last_undo_push: Instant,
     audio_error: Option<String>,
     last_reconnect: Instant,
     slots: Vec<Slot>,
@@ -213,6 +217,9 @@ impl App {
             last_wanted: Vec::new(),
             meter: (0.0, 0.0),
             drag_out: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_undo_push: Instant::now(),
             audio_error: None,
             last_reconnect: Instant::now(),
             slots: (0..CUE_COUNT)
@@ -532,6 +539,8 @@ impl App {
     }
 
     fn reset_show_state(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
         self.preselect = None;
         self.armed = None;
         self.view_bank = 0;
@@ -818,6 +827,17 @@ impl App {
                 self.save(false);
             }
             if !ctx.egui_wants_keyboard_input() {
+                let (undo, redo) = ctx.input_mut(|i| {
+                    let redo = i.consume_shortcut(&sc(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z))
+                        || i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Y));
+                    (i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Z)), redo)
+                });
+                if undo {
+                    self.undo_redo(false);
+                }
+                if redo {
+                    self.undo_redo(true);
+                }
                 let (enter, esc, del, up, down) = ctx.input_mut(|i| {
                     (
                         i.consume_key(Modifiers::NONE, Key::Enter),
@@ -848,6 +868,66 @@ impl App {
                     self.selected = (self.selected + 1).min(CUE_COUNT - 1);
                 }
             }
+        }
+    }
+
+    /// Step back (or forward) through the edit history.
+    fn undo_redo(&mut self, forward: bool) {
+        let (from, to) = if forward { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
+        let Some(p) = from.pop() else { return };
+        to.push(std::mem::replace(&mut self.project, p));
+        self.project.modified = today();
+        self.dirty = true;
+        self.sync_slots();
+        self.plan_dirty = true;
+    }
+
+    fn collect_audio(&mut self) {
+        let Some(dir) = self.file.as_ref().and_then(|f| f.parent()).map(Path::to_path_buf) else {
+            self.dialog = Dialog::Message("Collect audio".into(), "Save the show first: the audio goes into an Audio folder next to it.".into());
+            return;
+        };
+        let before = self.project.clone();
+        let (copied, failures) = self.project.collect(&dir);
+        if self.project != before {
+            self.undo.push(before);
+            self.sync_slots();
+            self.save(false);
+        }
+        let mut msg = format!("{copied} file(s) copied into {}.", dir.join("Audio").display());
+        if !failures.is_empty() {
+            msg += &format!("\n\nFailed:\n{}", failures.join("\n"));
+        }
+        self.dialog = Dialog::Message("Collect audio".into(), msg);
+    }
+
+    fn relink_missing(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().set_title("Folder to search for missing audio").pick_folder() else { return };
+        let before = self.project.clone();
+        let (found, missing) = self.project.relink(&folder);
+        if found > 0 {
+            self.undo.push(before);
+            self.dirty = true;
+            self.sync_slots();
+        }
+        self.dialog = Dialog::Message("Find missing files".into(), format!("{found} file(s) found, {missing} still missing."));
+    }
+
+    fn export_cue_list(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Printable page (HTML)", &["html"])
+            .add_filter("Spreadsheet (CSV)", &["csv"])
+            .set_file_name(format!("{} - cue list.html", self.project.name))
+            .save_file()
+        else {
+            return;
+        };
+        let lengths: Vec<Option<String>> =
+            (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.rate_for(c).max(1) as u64))).collect();
+        let csv = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
+        let text = if csv { crate::export::csv(&self.project, &lengths) } else { crate::export::html(&self.project, &lengths) };
+        if let Err(e) = std::fs::write(&path, text) {
+            self.dialog = Dialog::Message("Export failed".into(), format!("{}: {e}", path.display()));
         }
     }
 
@@ -1447,12 +1527,28 @@ impl App {
                 if ui.button("Save as…  Ctrl+Shift+S").clicked() {
                     self.save(true);
                 }
+                if ui.button("Export cue list…").on_hover_text("Printable page (save as PDF from the browser) or CSV").clicked() {
+                    self.export_cue_list();
+                }
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
             ui.menu_button("Project", |ui| {
+                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo   Ctrl+Z")).clicked() {
+                    self.undo_redo(false);
+                }
+                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo   Ctrl+Y")).clicked() {
+                    self.undo_redo(true);
+                }
+                ui.separator();
+                if ui.button("Collect audio into show folder").on_hover_text("Copy every file next to the show, to move it to another PC").clicked() {
+                    self.collect_audio();
+                }
+                if ui.button("Find missing files…").clicked() {
+                    self.relink_missing();
+                }
                 if ui.button("Reload all audio files").clicked() {
                     for s in &mut self.slots {
                         s.path.clear();
@@ -1919,6 +2015,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Edit Mode", ""),
     ("Enter / double-click", "Preview the selected cue"),
     ("Del", "Clear the selected cue"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Alt+Up / Alt+Down", "Move the selected cue"),
     ("Drop files", "Fill cues from the row under the mouse"),
     ("Ctrl+N / O / S", "New / open / save (Ctrl+Shift+S: save as)"),
@@ -1953,9 +2050,15 @@ impl eframe::App for App {
         self.dialogs(&ctx);
 
         if !std::mem::take(&mut self.replaced) && self.project != before {
-            if self.project.cues != before.cues || self.project.banks != before.banks || self.project.playback != before.playback {
-                self.project.modified = today();
+            if self.last_undo_push.elapsed() > Duration::from_secs(1) {
+                self.undo.push(before);
+                if self.undo.len() > 200 {
+                    self.undo.remove(0);
+                }
             }
+            self.last_undo_push = Instant::now();
+            self.redo.clear();
+            self.project.modified = today();
             self.dirty = true;
             self.sync_slots();
             self.plan_dirty = true;

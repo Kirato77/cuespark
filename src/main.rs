@@ -4,6 +4,7 @@
 mod app;
 mod decode;
 mod engine;
+mod export;
 mod project;
 mod update;
 
