@@ -30,6 +30,9 @@ const GREY: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
 const DIM: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
 const WHITE: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf2);
 const ROW_SELECTED: Color32 = Color32::from_rgb(0xf6, 0xee, 0xc4);
+const ROW_SELECTED_DARK: Color32 = Color32::from_rgb(0x5a, 0x46, 0x14);
+const ORANGE: Color32 = Color32::from_rgb(0xff, 0x9a, 0x1f);
+const GREEN: Color32 = Color32::from_rgb(0x3c, 0xc8, 0x5a);
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -43,11 +46,12 @@ pub struct Prefs {
     pub check_updates: bool,
     /// Master volume 0..1.
     pub master: f32,
+    pub edit_dark: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true, master: 1.0 }
+        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true, master: 1.0, edit_dark: true }
     }
 }
 
@@ -169,6 +173,8 @@ pub struct App {
     last_wanted: Vec<Option<String>>,
     /// Decaying level meter (left, right).
     meter: (f32, f32),
+    /// Which waveform marker the mouse is dragging: true = out point.
+    drag_out: bool,
     audio_error: Option<String>,
     last_reconnect: Instant,
     slots: Vec<Slot>,
@@ -206,6 +212,7 @@ impl App {
             display: 0,
             last_wanted: Vec::new(),
             meter: (0.0, 0.0),
+            drag_out: false,
             audio_error: None,
             last_reconnect: Instant::now(),
             slots: (0..CUE_COUNT)
@@ -904,7 +911,21 @@ impl App {
         for (txt, dx) in [("min", 0.0), ("sec", 82.0), ("msec", 165.0)] {
             p.text(pos2(cx + dx, y0), Align2::LEFT_TOP, txt, small.clone(), GREY);
         }
-        let clock_rect = p.text(pos2(cx - 3.0, y0 + 10.0), Align2::LEFT_TOP, &clock, FontId::monospace(50.0), WHITE);
+        // Last seconds turn the clock orange, then red, to anticipate the next cue.
+        let left_ms = snap.len.saturating_sub(snap.pos) * 1000 / rate;
+        let clock_color = match snap.cue {
+            Some(_) if !snap.paused && left_ms < 5_000 => RED,
+            Some(_) if !snap.paused && left_ms < 10_000 => ORANGE,
+            _ => WHITE,
+        };
+        let clock_rect = p.text(pos2(cx - 3.0, y0 + 10.0), Align2::LEFT_TOP, &clock, FontId::monospace(50.0), clock_color);
+        let nx = full.max.x - transport_w;
+        p.text(pos2(nx, y0), Align2::LEFT_TOP, "NEXT  (Space)", FontId::proportional(10.0), GREY);
+        let next = match self.preselect {
+            Some(n) => format!("{} {}  {}", bank_letter(n / CUES_PER_BANK), cue_key(n), self.project.cues[n].name),
+            None => "—".into(),
+        };
+        fit_text(p, pos2(nx, y0 + 14.0), Align2::LEFT_TOP, &next, FontId::proportional(20.0), WHITE, transport_w);
         let ela = pos2(clock_rect.max.x + 8.0, clock_rect.center().y - 12.0);
         p.text(ela, Align2::LEFT_TOP, "ELA", FontId::proportional(12.0), if self.show_remaining { DIM } else { WHITE });
         p.text(ela + vec2(0.0, 14.0), Align2::LEFT_TOP, "REM", FontId::proportional(12.0), if self.show_remaining { WHITE } else { DIM });
@@ -950,10 +971,16 @@ impl App {
         p.text(pos2(bar.max.x, bar.max.y + 3.0), Align2::RIGHT_TOP, fmt_time(len, rate), FontId::proportional(10.0), GREY);
 
         // Transport.
-        let tw = (transport_w - 3.0 * 4.0) / 4.0;
+        let tw = (transport_w - 4.0 * 4.0) / 5.0;
         let ty = full.max.y - 60.0;
-        let icons = [Icon::Stop, Icon::Pause, Icon::Prev, Icon::Next];
-        let tips = ["Stop (Esc, twice = cut)", "Pause / resume (P)", "Preselect previous cue (Up arrow)", "Preselect next cue (Down arrow)"];
+        let icons = [Icon::Stop, Icon::Fade, Icon::Pause, Icon::Prev, Icon::Next];
+        let tips = [
+            "Stop (Esc, twice = cut)",
+            "Fade out with each cue's fade-out time (F)",
+            "Pause / resume (P)",
+            "Preselect previous cue (Up arrow)",
+            "Preselect next cue (Down arrow)",
+        ];
         for (i, (icon, tip)) in icons.into_iter().zip(tips).enumerate() {
             let r = Rect::from_min_size(pos2(full.max.x - transport_w + i as f32 * (tw + 4.0), ty), vec2(tw, 40.0));
             let resp = ui.interact(r, ui.scope_id().with(("transport", i)), Sense::click()).on_hover_text(tip);
@@ -963,6 +990,7 @@ impl App {
             if resp.clicked() {
                 match icon {
                     Icon::Stop => self.stop(),
+                    Icon::Fade => self.fade_out(),
                     Icon::Pause => self.toggle_pause(),
                     Icon::Prev => self.step_preselect(false),
                     Icon::Next => self.step_preselect(true),
@@ -988,9 +1016,8 @@ impl App {
             if active {
                 p.line_segment([r.left_top() + vec2(1.0, 1.0), r.right_top() + vec2(-1.0, 1.0)], Stroke::new(2.0, RED));
             }
-            let name = &self.project.banks[b].name;
-            let name = if name.is_empty() { "--" } else { name };
-            fit_text(p, r.center(), Align2::CENTER_CENTER, name, FontId::proportional(12.0), if active { RED } else { WHITE }, tab_w - 10.0);
+            let name = self.project.banks[b].label(b);
+            fit_text(p, r.center(), Align2::CENTER_CENTER, &name, FontId::proportional(12.0), if active { RED } else { WHITE }, tab_w - 10.0);
             if resp.clicked() {
                 self.view_bank = b;
             }
@@ -1018,7 +1045,20 @@ impl App {
             let playing = snap.cue == Some(id);
             let p = ui.painter();
             let (top, bottom) = if playing { (RED, RED_DARK) } else { (BTN_TOP, BTN_BOTTOM) };
-            draw_button_bg(p, r, top, bottom, resp.hovered() && !cue.is_empty());
+            if cue.is_empty() {
+                p.rect_filled(r, 2.0, Color32::from_gray(0x1a));
+                p.rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_gray(0x2a)), StrokeKind::Inside);
+            } else {
+                draw_button_bg(p, r, top, bottom, resp.hovered());
+            }
+            if playing && snap.len > 0 {
+                let f = (snap.pos as f32 / snap.len as f32).clamp(0.0, 1.0);
+                let strip = Rect::from_min_size(pos2(r.min.x, r.max.y - 5.0), vec2(r.width() * f, 5.0));
+                p.rect_filled(strip, 0.0, WHITE);
+            }
+            if cue.layer && !cue.is_empty() {
+                p.text(pos2(r.max.x - 8.0, r.min.y + 6.0), Align2::RIGHT_TOP, "OVER", FontId::proportional(9.0), GREY);
+            }
             if self.preselect == Some(id) && !playing {
                 p.rect_filled(Rect::from_min_size(r.min, vec2(12.0, r.height())), 0.0, RED);
             }
@@ -1095,6 +1135,21 @@ impl App {
             p.text(pos2(x + w, y), Align2::RIGHT_TOP, txt, FontId::proportional(11.0), WHITE);
             p.line_segment([pos2(x, y + 16.0), pos2(x + w, y + 16.0)], Stroke::new(1.0, Color32::from_gray(0x60)));
         };
+        heading(ui, full.min.x, full.width(), y, "LEVEL");
+        y += 22.0;
+        let bar_w = full.width() - 70.0;
+        for (i, level) in [self.meter.0, self.meter.1].into_iter().enumerate() {
+            let r = Rect::from_min_size(pos2(full.min.x + 70.0, y + i as f32 * 9.0), vec2(bar_w, 6.0));
+            draw_meter(ui.painter(), r, level);
+        }
+        ui.painter().text(pos2(full.min.x, y + 7.0), Align2::LEFT_CENTER, "L / R", FontId::proportional(10.0), GREY);
+        y += 22.0;
+        ui.painter().text(pos2(full.min.x, y + 9.0), Align2::LEFT_CENTER, "MASTER", FontId::proportional(10.0), GREY);
+        let slider = Rect::from_min_size(pos2(full.min.x + 66.0, y), vec2(bar_w + 4.0, 18.0));
+        let db = if self.prefs.master > 0.0 { format!("{:+.1} dB", 20.0 * self.prefs.master.log10()) } else { "-inf".into() };
+        ui.put(slider, egui::Slider::new(&mut self.prefs.master, 0.0..=1.0).show_value(false).trailing_fill(true))
+            .on_hover_text(format!("Master volume {db} (all outputs)"));
+        y += 32.0;
         heading(ui, full.min.x, half, y, "BANK SETTINGS");
         heading(ui, full.min.x + half + 10.0, half, y, "PLAYBACK SETTINGS");
         y += 22.0;
@@ -1208,7 +1263,7 @@ impl App {
                 ui.allocate_ui(vec2(ui.available_width(), 170.0), |ui| group(ui, "Playback Settings", |ui| self.playback_box(ui)));
             });
             ui.add_space(6.0);
-            let bottom_h = 120.0;
+            let bottom_h = 196.0;
             let table_h = (ui.available_height() - bottom_h).max(150.0);
             ui.allocate_ui(vec2(ui.available_width(), table_h), |ui| group(ui, "Cue Settings", |ui| self.cue_table(ui, &snap)));
             ui.add_space(4.0);
@@ -1221,18 +1276,101 @@ impl App {
                         self.move_cue(true);
                     }
                 });
-                ui.vertical(|ui| {
-                    let c = self.selected;
-                    ui.label(format!("Cue information for {} {}  (shown in Show Mode when preselected)", bank_letter(c / CUES_PER_BANK), cue_key(c)));
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.project.cues[c].notes)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(4)
-                            .hint_text("Script line, stage cue, reminder…"),
-                    );
-                });
+                self.cue_inspector(ui);
             });
         });
+    }
+
+    /// Bottom of Edit Mode: everything about the selected cue.
+    fn cue_inspector(&mut self, ui: &mut Ui) {
+        let c = self.selected;
+        let dur = self.slots[c].clip().map(|k| k.frames() as f64 / self.rate_for(c).max(1) as f64).unwrap_or(0.0);
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width() * 0.62);
+            let cue = &mut self.project.cues[c];
+            ui.horizontal(|ui| {
+                ui.strong(format!("{} {}", bank_letter(c / CUES_PER_BANK), cue_key(c)));
+                ui.label("Volume");
+                ui.add(egui::DragValue::new(&mut cue.gain_db).range(-60.0..=12.0).speed(0.1).suffix(" dB").fixed_decimals(1));
+                ui.label("Fade in");
+                ui.add(egui::DragValue::new(&mut cue.fade_in).range(0.0..=60.0).speed(0.05).suffix(" s").fixed_decimals(2));
+                ui.label("Fade out");
+                ui.add(egui::DragValue::new(&mut cue.fade_out).range(0.0..=60.0).speed(0.05).suffix(" s").fixed_decimals(2))
+                    .on_hover_text("Used by the F key and the Fade button");
+                ui.checkbox(&mut cue.layer, "Play over other cues")
+                    .on_hover_text("Keep what is playing instead of replacing it");
+            });
+            ui.horizontal(|ui| {
+                ui.label("In");
+                ui.add(egui::DragValue::new(&mut cue.start).range(0.0..=dur).speed(0.01).suffix(" s").fixed_decimals(3));
+                ui.label("Out");
+                ui.add(
+                    egui::DragValue::new(&mut cue.end)
+                        .range(0.0..=dur)
+                        .speed(0.01)
+                        .custom_formatter(|v, _| if v <= 0.0 { "end".into() } else { format!("{v:.3} s") }),
+                );
+                if ui.small_button("Reset").on_hover_text("Play the whole file").clicked() {
+                    (cue.start, cue.end) = (0.0, 0.0);
+                }
+                ui.weak("Drag the red markers on the waveform");
+            });
+            self.waveform(ui, c, dur);
+        });
+        ui.vertical(|ui| {
+            ui.label("Cue information (shown in Show Mode when preselected)");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.project.cues[c].notes)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(7)
+                    .hint_text("Script line, stage cue, reminder…"),
+            );
+        });
+    }
+
+    /// Waveform of cue `c` with draggable in/out markers.
+    fn waveform(&mut self, ui: &mut Ui, c: CueId, dur: f64) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 92.0), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, Color32::from_gray(0x16));
+        let Some(clip) = self.slots[c].clip().cloned().filter(|_| dur > 0.0) else {
+            p.text(rect.center(), Align2::CENTER_CENTER, "No audio loaded", FontId::proportional(12.0), GREY);
+            return;
+        };
+        let n = clip.peaks.len().max(1) as f32;
+        for (i, &pk) in clip.peaks.iter().enumerate() {
+            let x = rect.left() + rect.width() * (i as f32 + 0.5) / n;
+            let h = (pk * rect.height() * 0.48).max(0.5);
+            p.line_segment([pos2(x, rect.center().y - h), pos2(x, rect.center().y + h)], Stroke::new(1.0, Color32::from_gray(0xa0)));
+        }
+        let cue = &mut self.project.cues[c];
+        let x_of = |t: f64| rect.left() + rect.width() * (t / dur) as f32;
+        let t_of = |x: f32| (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * dur * 1000.0).round() / 1000.0;
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let end = if cue.end > 0.0 { cue.end } else { dur };
+            if resp.drag_started() || resp.clicked() {
+                self.drag_out = (pos.x - x_of(end)).abs() < (pos.x - x_of(cue.start)).abs();
+            }
+            if resp.dragged() || resp.clicked() {
+                let t = t_of(pos.x);
+                if self.drag_out {
+                    cue.end = if t >= dur - 0.005 { 0.0 } else { t.max(cue.start + 0.01) };
+                } else {
+                    cue.start = t.min(end - 0.01).max(0.0);
+                }
+            }
+        }
+        let end = if cue.end > 0.0 { cue.end.min(dur) } else { dur };
+        let shade = Color32::from_black_alpha(170);
+        p.rect_filled(Rect::from_min_max(rect.min, pos2(x_of(cue.start), rect.max.y)), 0.0, shade);
+        p.rect_filled(Rect::from_min_max(pos2(x_of(end), rect.min.y), rect.max), 0.0, shade);
+        for (t, label, align) in [(cue.start, "IN", Align2::LEFT_TOP), (end, "OUT", Align2::RIGHT_TOP)] {
+            let x = x_of(t).clamp(rect.left() + 1.0, rect.right() - 1.0);
+            p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(2.0, RED));
+            let dx = if label == "IN" { 4.0 } else { -4.0 };
+            p.text(pos2(x + dx, rect.top() + 2.0), align, label, FontId::proportional(10.0), RED);
+        }
+        resp.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     }
 
     /// Right side of the Edit Mode toolbar. Never shown in Show Mode.
@@ -1344,6 +1482,7 @@ impl App {
                 });
                 ui.checkbox(&mut self.prefs.keep_awake, "Keep screen awake in Show Mode");
                 ui.checkbox(&mut self.prefs.check_updates, "Check for updates at startup");
+                ui.checkbox(&mut self.prefs.edit_dark, "Dark Edit Mode");
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("Keyboard shortcuts").clicked() {
@@ -1460,7 +1599,7 @@ impl App {
             .column(Column::exact(40.0))
             .column(Column::exact(60.0))
             .header(20.0, |mut h| {
-                for t in ["Bank", "Cue", "Link", "Cue Name", "Source path of the Clip", "Length", "Size", "Type", ""] {
+                for t in ["Bank", "Cue", "Link", "Cue Name", "Audio file", "Length", "Size", "Type", ""] {
                     h.col(|ui| {
                         ui.strong(t);
                     });
@@ -1490,7 +1629,8 @@ impl App {
                             browse = Some(c);
                         }
                         let slot = &self.slots[c];
-                        let txt = egui::RichText::new(&cue.path);
+                        // File name only; the full path is in the tooltip.
+                        let txt = egui::RichText::new(Path::new(&cue.path).file_name().map(|f| f.to_string_lossy()).unwrap_or_default());
                         match &slot.state {
                             SlotState::Failed(e) => {
                                 ui.label(txt.color(Color32::from_rgb(0xc0, 0x20, 0x20))).on_hover_text(e);
@@ -1558,14 +1698,15 @@ impl App {
     // ============================================================== shared
 
     fn status_bar(&mut self, ui: &mut Ui, snap: &Snapshot) {
-        let dark = self.mode == Mode::Show;
+        let show = self.mode == Mode::Show;
+        let dark = show || self.prefs.edit_dark;
         let frame = egui::Frame::new()
             .fill(if dark { BLACK } else { Color32::from_gray(0xe4) })
             .inner_margin(egui::Margin::symmetric(10, 3));
         egui::Panel::bottom("status").frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let text = if dark { WHITE } else { Color32::from_gray(0x20) };
-                ui.label(egui::RichText::new(if dark { "Show Mode is active" } else { "Edit Mode is active" }).color(text));
+                ui.label(egui::RichText::new(if show { "Show Mode is active" } else { "Edit Mode is active" }).color(text));
                 ui.separator();
                 if let Some(err) = &self.audio_error {
                     ui.label(egui::RichText::new(format!("AUDIO: {err}")).color(Color32::from_rgb(0xff, 0x50, 0x50)).strong());
@@ -1583,8 +1724,8 @@ impl App {
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if !dark {
-                        ui.label(egui::RichText::new(format!("v{VERSION}")).color(Color32::from_gray(0x70)));
+                    if !show {
+                        ui.label(egui::RichText::new(format!("v{VERSION}")).color(Color32::from_gray(0x80)));
                         ui.separator();
                     }
                     let name = format!("{}{}", self.project.name, if self.dirty { " *" } else { "" });
@@ -1748,6 +1889,12 @@ impl App {
         if self.mode == Mode::Show {
             let mut v = egui::Visuals::dark();
             v.panel_fill = BG;
+            v.selection.bg_fill = RED_DARK;
+            v.widgets.hovered.bg_fill = Color32::from_gray(0x50);
+            ctx.set_visuals(v);
+        } else if self.prefs.edit_dark {
+            let mut v = egui::Visuals::dark();
+            v.selection.bg_fill = ROW_SELECTED_DARK;
             ctx.set_visuals(v);
         } else {
             let mut v = egui::Visuals::light();
@@ -1763,6 +1910,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1 … F10", "Fire cue of the visible bank"),
     ("Space / Enter", "GO: fire the preselected cue"),
     ("Esc", "Stop (with the stop fade). Twice: cut now"),
+    ("F", "Fade out (each cue's own fade-out time)"),
     ("P", "Pause / resume"),
     ("Up / Down arrows", "Preselect previous / next cue"),
     ("Left / Right, 1 … 5", "Show previous / next bank, or bank A … E"),
@@ -1841,6 +1989,15 @@ fn fit_text(p: &egui::Painter, pos: Pos2, align: Align2, text: &str, font: FontI
     p.galley(rect.min, galley, color);
 }
 
+/// Horizontal level meter: -60 dBFS..0 dBFS, green / orange / red.
+fn draw_meter(p: &egui::Painter, r: Rect, level: f32) {
+    p.rect_filled(r, 1.0, Color32::from_gray(0x24));
+    let db = 20.0 * level.max(1e-6).log10();
+    let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+    let color = if db > -3.0 { RED } else if db > -12.0 { ORANGE } else { GREEN };
+    p.rect_filled(Rect::from_min_size(r.min, vec2(r.width() * f, r.height())), 1.0, color);
+}
+
 fn is_audio(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
 }
@@ -1882,6 +2039,7 @@ fn led_button(ui: &mut Ui, r: Rect, label: &str, value: &bool, enabled: bool, id
 #[derive(Clone, Copy)]
 enum Icon {
     Stop,
+    Fade,
     Pause,
     Prev,
     Next,
@@ -1892,6 +2050,9 @@ fn draw_icon(p: &egui::Painter, c: Pos2, icon: Icon, color: Color32) {
     match icon {
         Icon::Stop => {
             p.rect_filled(Rect::from_center_size(c, Vec2::splat(2.0 * s)), 0.0, color);
+        }
+        Icon::Fade => {
+            p.text(c, Align2::CENTER_CENTER, "FADE", FontId::proportional(15.0), color);
         }
         Icon::Pause => {
             p.rect_filled(Rect::from_center_size(c - vec2(5.0, 0.0), vec2(5.0, 2.0 * s)), 0.0, color);
