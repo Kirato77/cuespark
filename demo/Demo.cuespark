@@ -1,0 +1,336 @@
+{
+ "version": 1,
+ "name": "Demo - WestSideStory",
+ "created": "07.12.2007",
+ "modified": "06.09.2008",
+ "banks": [
+  {
+   "name": "Part 1/1",
+   "link_cues": true,
+   "link_bank": false,
+   "loop_bank": false
+  },
+  {
+   "name": "Part 1/2",
+   "link_cues": true
+  },
+  {
+   "name": "Part 2"
+  },
+  {
+   "name": "--"
+  },
+  {
+   "name": "--"
+  }
+ ],
+ "cues": [
+  {
+   "name": "Mobiles off!",
+   "path": "AudioClips/mobiles_off.wav",
+   "link": true,
+   "notes": ""
+  },
+  {
+   "name": "Intro",
+   "path": "AudioClips/intro.wav",
+   "link": false,
+   "notes": "(overture)"
+  },
+  {
+   "name": "Police whistle",
+   "path": "AudioClips/police_whistle.wav",
+   "link": false,
+   "notes": "(scene 1)\n\n(BABY JOHN:)\n\"Jets!\""
+  },
+  {
+   "name": "Bells",
+   "path": "AudioClips/bells.wav",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "Car breaks",
+   "path": "AudioClips/car_breaks.wav",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "Highway",
+   "path": "AudioClips/bells.wav",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "Police whistle",
+   "path": "AudioClips/police_whistle.wav",
+   "link": true,
+   "notes": ""
+  },
+  {
+   "name": "Car breaks",
+   "path": "AudioClips/car_breaks.wav",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "Missing file",
+   "path": "AudioClips/nope.mp3",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  },
+  {
+   "name": "",
+   "path": "",
+   "link": false,
+   "notes": ""
+  }
+ ],
+ "playback": {
+  "auto_preselect": true,
+  "preselect_next": true,
+  "loop_cue": false,
+  "auto_start": false,
+  "start_time": "20:00"
+ }
+}

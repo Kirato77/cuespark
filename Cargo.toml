@@ -1,0 +1,30 @@
+[package]
+name = "cuespark"
+version = "0.1.0"
+edition = "2024"
+description = "Instant playback of show sound cues (theatre, live events)"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "persistence", "wayland", "x11", "clipboard", "accesskit"] }
+egui_extras = "0.37"
+cpal = "0.18"
+symphonia = { version = "0.6", features = ["all"] }
+rubato = "5"
+rtrb = "0.4"
+rfd = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Decoding in debug builds is too slow to be usable.
+[profile.dev.package."*"]
+opt-level = 3
