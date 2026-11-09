@@ -2,6 +2,7 @@
 
 use crate::decode::{Clip, decode_file};
 use crate::engine::{Cmd, Engine, Plan, Snapshot, output_device_names};
+use crate::update::{self, VERSION};
 use crate::project::{
     BANKS, CUE_COUNT, CUES_PER_BANK, Cue, CueId, EXTENSION, Project, bank_letter, cue_key, next_start, parse_hhmm, today,
 };
@@ -39,11 +40,12 @@ pub struct Prefs {
     pub recent: Vec<PathBuf>,
     pub reopen_last: bool,
     pub keep_awake: bool,
+    pub check_updates: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true }
+        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true }
     }
 }
 
@@ -140,6 +142,7 @@ enum Dialog {
     Message(String, String),
     Shortcuts,
     About,
+    Licenses,
 }
 
 pub struct App {
@@ -170,6 +173,10 @@ pub struct App {
     devices: Vec<String>,
     /// Set when New/Open swap the whole show this frame, so it isn't seen as an edit.
     replaced: bool,
+    update: update::Shared,
+    logo: egui::TextureHandle,
+    /// Show "up to date" / errors only when the user asked; a silent startup check stays silent.
+    update_manual: bool,
 }
 
 impl App {
@@ -207,7 +214,17 @@ impl App {
             keep_awake_on: false,
             devices: output_device_names(),
             replaced: false,
+            update: Arc::new(Mutex::new(update::State::Idle)),
+            logo: cc.egui_ctx.load_texture(
+                "logo",
+                egui::ColorImage::from_rgba_unmultiplied([128, 128], include_bytes!("../assets/icon-128.rgba")),
+                egui::TextureOptions::LINEAR,
+            ),
+            update_manual: false,
         };
+        if app.prefs.check_updates {
+            update::check(&app.update, &cc.egui_ctx);
+        }
         let reopen = app.prefs.recent.first().filter(|p| app.prefs.reopen_last && p.exists()).cloned();
         if let Some(path) = open_arg.or(reopen) {
             app.open_path(&path);
@@ -718,6 +735,7 @@ impl App {
             .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(16, 8)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
+                    ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(28.0, 28.0)));
                     ui.label(egui::RichText::new("Cue").color(WHITE).size(22.0).strong());
                     ui.add_space(-6.0);
                     ui.label(egui::RichText::new("Spark").color(RED).size(22.0).strong());
@@ -777,7 +795,7 @@ impl App {
             let label = format!("{} {}  {}", bank_letter(c / CUES_PER_BANK), cue_key(c), self.project.cues[c].name);
             let color = if snap.paused { GREY } else { RED };
             let txt = if snap.paused { format!("PAUSED   {label}") } else { format!("PLAYING   {label}") };
-            p.text(pos2(bx, y0 + 54.0), Align2::LEFT_TOP, txt, FontId::proportional(14.0), color);
+            fit_text(p, pos2(bx, y0 + 54.0), Align2::LEFT_TOP, &txt, FontId::proportional(14.0), color, left.max.x - bx);
         }
 
         // Progress bar with ticks.
@@ -836,7 +854,7 @@ impl App {
             }
             let name = &self.project.banks[b].name;
             let name = if name.is_empty() { "--" } else { name };
-            p.text(r.center(), Align2::CENTER_CENTER, name, FontId::proportional(12.0), if active { RED } else { WHITE });
+            fit_text(p, r.center(), Align2::CENTER_CENTER, name, FontId::proportional(12.0), if active { RED } else { WHITE }, tab_w - 10.0);
             if resp.clicked() {
                 self.view_bank = b;
             }
@@ -872,7 +890,7 @@ impl App {
             let name_color = if cue.is_empty() { DIM } else { WHITE };
             let name = if cue.is_empty() { "" } else if cue.name.is_empty() { "(no name)" } else { &cue.name };
             let name_size = (bh * 0.24).clamp(12.0, 20.0);
-            p.text(pos2(r.center().x, r.min.y + bh * 0.25), Align2::CENTER_CENTER, name, FontId::proportional(name_size), name_color);
+            fit_text(p, pos2(r.center().x, r.min.y + bh * 0.25), Align2::CENTER_CENTER, name, FontId::proportional(name_size), name_color, bw - 28.0);
             p.line_segment(
                 [pos2(r.min.x + 1.0, r.min.y + bh * 0.5), pos2(r.max.x - 1.0, r.min.y + bh * 0.5)],
                 Stroke::new(1.0, if playing { RED_DARK } else { BLACK }),
@@ -981,7 +999,7 @@ impl App {
             p.rect_filled(head, 0.0, Color32::from_gray(0x26));
             p.line_segment([pos2(info.min.x + 54.0, head.min.y), pos2(info.min.x + 54.0, head.max.y)], Stroke::new(1.0, BLACK));
             p.text(pos2(info.min.x + 8.0, head.center().y), Align2::LEFT_CENTER, cue_key(c), FontId::proportional(15.0), GREY);
-            p.text(pos2(info.min.x + 62.0, head.center().y), Align2::LEFT_CENTER, &self.project.cues[c].name, FontId::proportional(15.0), WHITE);
+            fit_text(p, pos2(info.min.x + 62.0, head.center().y), Align2::LEFT_CENTER, &self.project.cues[c].name, FontId::proportional(15.0), WHITE, info.width() - 70.0);
             let body = Rect::from_min_max(pos2(info.min.x + 8.0, head.max.y + 10.0), info.max - vec2(8.0, 8.0));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
             egui::ScrollArea::vertical().id_salt("notes").show(&mut child, |ui| {
@@ -1010,6 +1028,7 @@ impl App {
                 if ui.button("Save").on_hover_text("Save (Ctrl+S)").clicked() {
                     self.save(false);
                 }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.update_widget(ui));
             });
         });
         egui::Panel::top("matrix_title")
@@ -1081,6 +1100,58 @@ impl App {
         });
     }
 
+    /// Right side of the Edit Mode toolbar. Never shown in Show Mode.
+    fn update_widget(&mut self, ui: &mut Ui) {
+        let state = self.update.lock().map(|s| s.clone()).unwrap_or(update::State::Idle);
+        let ctx = ui.ctx().clone();
+        match state {
+            update::State::Idle => {}
+            update::State::Checking => {
+                if self.update_manual {
+                    ui.label("Checking for updates…");
+                }
+            }
+            update::State::UpToDate => {
+                if self.update_manual {
+                    ui.label(format!("Cue Spark {VERSION} is up to date"));
+                }
+            }
+            update::State::Failed(e) => {
+                if self.update_manual {
+                    ui.colored_label(Color32::from_rgb(0xc0, 0x20, 0x20), "Update failed").on_hover_text(e);
+                }
+            }
+            update::State::Available(u) => {
+                let label = egui::RichText::new(format!("Update to {}", u.version)).color(Color32::WHITE).strong();
+                if ui.add(egui::Button::new(label).fill(RED)).on_hover_text("Download and install the new version").clicked() {
+                    if self.status().cue.is_some() {
+                        self.dialog = Dialog::Message("Update".into(), "Stop playback first.".into());
+                    } else if self.dirty {
+                        self.dialog = Dialog::Message("Update".into(), "Save the show first (Ctrl+S).".into());
+                    } else {
+                        update::install(u, &self.update, &ctx);
+                    }
+                }
+            }
+            update::State::Downloading(v) => {
+                ui.add(egui::Spinner::new());
+                ui.label(format!("Downloading {v}…"));
+            }
+            update::State::Installed(v) => {
+                let label = egui::RichText::new(format!("Restart to use {v}")).color(Color32::WHITE).strong();
+                if ui.add(egui::Button::new(label).fill(RED)).clicked() && self.status().cue.is_none() && !self.dirty {
+                    match update::restart(self.file.as_deref()) {
+                        Ok(()) => {
+                            self.allow_close = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Err(e) => self.dialog = Dialog::Message("Restart failed".into(), e),
+                    }
+                }
+            }
+        }
+    }
+
     fn menu_bar(&mut self, ui: &mut Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -1137,10 +1208,15 @@ impl App {
                     ui.add(egui::DragValue::new(&mut self.prefs.stop_fade_ms).range(0..=10_000).suffix(" ms").speed(10));
                 });
                 ui.checkbox(&mut self.prefs.keep_awake, "Keep screen awake in Show Mode");
+                ui.checkbox(&mut self.prefs.check_updates, "Check for updates at startup");
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("Keyboard shortcuts").clicked() {
                     self.dialog = Dialog::Shortcuts;
+                }
+                if ui.button("Check for updates").clicked() {
+                    self.update_manual = true;
+                    update::check(&self.update, ui.ctx());
                 }
                 if ui.button("About").clicked() {
                     self.dialog = Dialog::About;
@@ -1351,10 +1427,16 @@ impl App {
                     } else if failed > 0 {
                         ui.label(egui::RichText::new(format!("{failed} clip(s) missing or unreadable")).color(Color32::from_rgb(0xff, 0x70, 0x30)));
                     } else if let Some(c) = snap.cue.or(self.preselect) {
-                        ui.label(egui::RichText::new(&self.project.cues[c].path).color(text));
+                        // Leave room for the project name on the right; long paths end in "…".
+                        ui.set_max_width(ui.available_width() - 260.0);
+                        ui.add(egui::Label::new(egui::RichText::new(&self.project.cues[c].path).color(text)).truncate());
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !dark {
+                        ui.label(egui::RichText::new(format!("v{VERSION}")).color(Color32::from_gray(0x70)));
+                        ui.separator();
+                    }
                     let name = format!("{}{}", self.project.name, if self.dirty { " *" } else { "" });
                     ui.label(egui::RichText::new(name).color(text));
                     ui.separator();
@@ -1370,6 +1452,7 @@ impl App {
         let mut close = false;
         let mut then = None;
         let mut quit_show = false;
+        let mut licenses = false;
         match &self.dialog {
             Dialog::None => return,
             Dialog::Discard(p) => {
@@ -1432,9 +1515,35 @@ impl App {
             }
             Dialog::About => {
                 egui::Modal::new(egui::Id::unique("about")).show(ctx, |ui| {
-                    ui.heading(format!("Cue Spark {}", env!("CARGO_PKG_VERSION")));
+                    ui.heading(format!("Cue Spark {VERSION}"));
                     ui.label("Instant playback of show sound cues.");
-                    ui.label("Inspired by the workflow of CueFire FREE (audiobytes).");
+                    ui.hyperlink("https://github.com/Kirato77/cuespark");
+                    ui.add_space(6.0);
+                    ui.label("Inspired by the workflow of CueFire FREE. Not affiliated with audiobytes;");
+                    ui.label("CueFire is their name. No code from it is used.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Third-party licenses").clicked() {
+                            licenses = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            }
+            Dialog::Licenses => {
+                egui::Modal::new(egui::Id::unique("licenses")).show(ctx, |ui| {
+                    ui.heading("Third-party licenses");
+                    let max = ctx.content_rect().size() * vec2(0.8, 0.7);
+                    // ~7000 lines: only lay out the visible ones.
+                    let lines: Vec<&str> = THIRD_PARTY_LICENSES.lines().collect();
+                    let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                    egui::ScrollArea::vertical().max_height(max.y).show_rows(ui, row_h, lines.len(), |ui, rows| {
+                        ui.set_width(max.x);
+                        for line in &lines[rows] {
+                            ui.add(egui::Label::new(egui::RichText::new(*line).monospace()).extend());
+                        }
+                    });
                     if ui.button("Close").clicked() {
                         close = true;
                     }
@@ -1451,6 +1560,9 @@ impl App {
         }
         if close {
             self.dialog = Dialog::None;
+        }
+        if licenses {
+            self.dialog = Dialog::Licenses;
         }
         if let Some((p, save_first)) = then {
             if !save_first || self.save(false) {
@@ -1551,7 +1663,7 @@ impl eframe::App for App {
             self.plan_dirty = true;
         }
         let title = format!(
-            "Cue Spark  |  {}{}",
+            "Cue Spark {VERSION}  |  {}{}",
             self.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| self.project.name.clone()),
             if self.dirty { " *" } else { "" }
         );
@@ -1567,6 +1679,17 @@ impl eframe::App for App {
 }
 
 // ================================================================ drawing
+
+const THIRD_PARTY_LICENSES: &str = include_str!("../THIRD_PARTY_LICENSES.txt");
+
+/// Paint one line of text, cut with "…" when wider than `max_w`.
+fn fit_text(p: &egui::Painter, pos: Pos2, align: Align2, text: &str, font: FontId, color: Color32, max_w: f32) {
+    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), egui::TextFormat::simple(font, color));
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w.max(10.0));
+    let galley = p.layout_job(job);
+    let rect = align.anchor_size(pos, galley.size());
+    p.galley(rect.min, galley, color);
+}
 
 fn is_audio(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.to_lowercase().as_str()))

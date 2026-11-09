@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cue Spark
+Comment=Instant playback of show sound cues
+Exec=cuespark %f
+Icon=cuespark
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=cuespark

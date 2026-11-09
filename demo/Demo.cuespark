@@ -1,6 +1,6 @@
 {
  "version": 1,
- "name": "Demo - WestSideStory",
+ "name": "Demo show",
  "created": "07.12.2007",
  "modified": "06.09.2008",
  "banks": [
@@ -38,10 +38,10 @@
    "notes": "(overture)"
   },
   {
-   "name": "Police whistle",
+   "name": "Police whistle and crowd noise (long version for the finale)",
    "path": "AudioClips/police_whistle.wav",
    "link": false,
-   "notes": "(scene 1)\n\n(BABY JOHN:)\n\"Jets!\""
+   "notes": "(scene 1)\n\nWait for the actor's line:\n\"Over here!\""
   },
   {
    "name": "Bells",

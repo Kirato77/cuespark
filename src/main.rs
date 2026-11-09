@@ -5,16 +5,23 @@ mod app;
 mod decode;
 mod engine;
 mod project;
+mod update;
 
 fn main() -> eframe::Result {
-    let open_arg = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    // Absolute, so audio paths stay valid whatever the working directory.
+    let open_arg = std::env::args_os().nth(1).map(|p| std::fs::canonicalize(&p).unwrap_or(p.into()));
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Cue Spark")
             .with_app_id("cuespark")
             .with_inner_size([1100.0, 780.0])
             .with_min_inner_size([900.0, 620.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(eframe::egui::IconData {
+                rgba: include_bytes!("../assets/icon-128.rgba").to_vec(),
+                width: 128,
+                height: 128,
+            }),
         ..Default::default()
     };
     eframe::run_native("Cue Spark", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, open_arg)))))
