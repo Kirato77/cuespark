@@ -174,7 +174,6 @@ pub struct App {
     /// Set when New/Open swap the whole show this frame, so it isn't seen as an edit.
     replaced: bool,
     update: update::Shared,
-    logo: egui::TextureHandle,
     /// Show "up to date" / errors only when the user asked; a silent startup check stays silent.
     update_manual: bool,
 }
@@ -215,11 +214,6 @@ impl App {
             devices: output_device_names(),
             replaced: false,
             update: Arc::new(Mutex::new(update::State::Idle)),
-            logo: cc.egui_ctx.load_texture(
-                "logo",
-                egui::ColorImage::from_rgba_unmultiplied([128, 128], include_bytes!("../assets/icon-128.rgba")),
-                egui::TextureOptions::LINEAR,
-            ),
             update_manual: false,
         };
         if app.prefs.check_updates {
@@ -735,7 +729,6 @@ impl App {
             .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(16, 8)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(28.0, 28.0)));
                     ui.label(egui::RichText::new("Cue").color(WHITE).size(22.0).strong());
                     ui.add_space(-6.0);
                     ui.label(egui::RichText::new("Spark").color(RED).size(22.0).strong());
