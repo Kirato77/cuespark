@@ -15,6 +15,16 @@ use symphonia::core::meta::MetadataOptions;
 /// i16 halves RAM versus f32; 16 bits is below what any show PA can reproduce.
 pub struct Clip {
     pub data: Vec<i16>,
+    /// Peak level (0..1) of each of up to `PEAK_BUCKETS` equal slices, for the waveform view.
+    pub peaks: Vec<f32>,
+}
+
+pub const PEAK_BUCKETS: usize = 1000;
+
+fn peaks(data: &[i16]) -> Vec<f32> {
+    let frames = data.len() / 2;
+    let per = frames.div_ceil(PEAK_BUCKETS).max(1);
+    data.chunks(per * 2).map(|c| c.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0) as f32 / 32768.0).collect()
 }
 
 impl Clip {
@@ -30,12 +40,14 @@ pub fn decode_file(path: &Path, out_rate: u32) -> Result<Clip, String> {
     if stereo.is_empty() {
         return Err("file contains no audio".into());
     }
-    if in_rate == out_rate {
-        return Ok(Clip { data: stereo });
-    }
-    let resampled = resample(&stereo, in_rate, out_rate)?;
-    drop(stereo);
-    Ok(Clip { data: resampled.into_iter().map(to_i16).collect() })
+    let data = if in_rate == out_rate {
+        stereo
+    } else {
+        let resampled = resample(&stereo, in_rate, out_rate)?;
+        drop(stereo);
+        resampled.into_iter().map(to_i16).collect()
+    };
+    Ok(Clip { peaks: peaks(&data), data })
 }
 
 fn to_i16(s: f32) -> i16 {
@@ -152,6 +164,9 @@ pub mod tests {
         let mid = &clip.data[48000..48000 + 2000];
         assert!(mid.chunks(2).all(|f| f[0] == f[1]));
         let peak = mid.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(clip.peaks.len() <= PEAK_BUCKETS && clip.peaks.len() > 900);
+        let inner = &clip.peaks[10..clip.peaks.len() - 10];
+        assert!(inner.iter().all(|&p| (0.4..0.55).contains(&p)), "steady sine, steady peaks");
         assert!((15000..17500).contains(&peak), "peak {peak}");
         // 1 kHz -> 48 zero crossings per 24 ms... count over 0.5 s: ~1000 crossings.
         let left: Vec<i16> = clip.data.iter().step_by(2).copied().collect();

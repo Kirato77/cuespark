@@ -26,6 +26,20 @@ pub struct Bank {
     pub link_cues: bool,
     pub link_bank: bool,
     pub loop_bank: bool,
+    /// Output device name; None = the default output from Preferences.
+    pub output: Option<String>,
+    /// First output channel of the stereo pair (0 = outputs 1-2, 2 = outputs 3-4, ...).
+    pub channel: usize,
+}
+
+impl Bank {
+    /// Name shown on tabs: unnamed banks read "Bank D", not "--".
+    pub fn label(&self, index: usize) -> String {
+        match self.name.trim() {
+            "" | "--" => format!("Bank {}", bank_letter(index)),
+            n => n.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -36,6 +50,15 @@ pub struct Cue {
     pub path: String,
     pub link: bool,
     pub notes: String,
+    pub gain_db: f32,
+    /// Seconds.
+    pub fade_in: f32,
+    pub fade_out: f32,
+    /// In / out points in seconds; `end` 0 = play to the end of the file.
+    pub start: f64,
+    pub end: f64,
+    /// Play over the cues already playing instead of replacing them.
+    pub layer: bool,
 }
 
 impl Cue {
@@ -89,7 +112,7 @@ impl Default for Project {
             created: today.clone(),
             modified: today,
             banks: (0..BANKS)
-                .map(|_| Bank { name: "--".into(), ..Default::default() })
+                .map(|_| Bank::default())
                 .collect(),
             cues: vec![Cue::default(); CUE_COUNT],
             playback: Playback::default(),

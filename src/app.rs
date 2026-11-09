@@ -1,7 +1,7 @@
 //! The two-mode user interface: Show Mode (fire cues) and Edit Mode (configuration matrix).
 
 use crate::decode::{Clip, decode_file};
-use crate::engine::{Cmd, Engine, Plan, Snapshot, output_device_names};
+use crate::engine::{Cmd, Engine, NONE, Plan, PlanCue, Snapshot, output_device_names};
 use crate::update::{self, VERSION};
 use crate::project::{
     BANKS, CUE_COUNT, CUES_PER_BANK, Cue, CueId, EXTENSION, Project, bank_letter, cue_key, next_start, parse_hhmm, today,
@@ -41,11 +41,13 @@ pub struct Prefs {
     pub reopen_last: bool,
     pub keep_awake: bool,
     pub check_updates: bool,
+    /// Master volume 0..1.
+    pub master: f32,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true }
+        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true, master: 1.0 }
     }
 }
 
@@ -145,13 +147,28 @@ enum Dialog {
     Licenses,
 }
 
+/// One open output device and what the UI has already seen of it.
+struct Output {
+    /// Requested device (None = system default). The engine may have fallen back to the default.
+    key: Option<String>,
+    engine: Engine,
+    seen_starts: u64,
+    seen_autostarts: u64,
+}
+
 pub struct App {
     project: Project,
     file: Option<PathBuf>,
     dirty: bool,
     mode: Mode,
     prefs: Prefs,
-    engine: Option<Engine>,
+    outputs: Vec<Output>,
+    /// Output whose playing cue the clocks show (the one that started a cue last).
+    display: usize,
+    /// Output keys wanted by the banks at the last check, to reopen at once when routing changes.
+    last_wanted: Vec<Option<String>>,
+    /// Decaying level meter (left, right).
+    meter: (f32, f32),
     audio_error: Option<String>,
     last_reconnect: Instant,
     slots: Vec<Slot>,
@@ -162,8 +179,6 @@ pub struct App {
     view_bank: usize,
     show_remaining: bool,
     selected: CueId,
-    seen_starts: u64,
-    seen_autostarts: u64,
     armed: Option<CueId>,
     dialog: Dialog,
     allow_close: bool,
@@ -181,18 +196,17 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open_arg: Option<PathBuf>) -> Self {
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
-        let (engine, audio_error) = match Engine::open(prefs.device.as_deref()) {
-            Ok(e) => (Some(e), None),
-            Err(e) => (None, Some(e)),
-        };
         let mut app = Self {
             project: Project::default(),
             file: None,
             dirty: false,
             mode: Mode::Edit,
             prefs,
-            engine,
-            audio_error,
+            outputs: Vec::new(),
+            display: 0,
+            last_wanted: Vec::new(),
+            meter: (0.0, 0.0),
+            audio_error: None,
             last_reconnect: Instant::now(),
             slots: (0..CUE_COUNT)
                 .map(|_| Slot { path: String::new(), rate: 0, generation: 0, state: SlotState::Empty, size: None })
@@ -204,8 +218,6 @@ impl App {
             view_bank: 0,
             show_remaining: false,
             selected: 0,
-            seen_starts: 0,
-            seen_autostarts: 0,
             armed: None,
             dialog: Dialog::None,
             allow_close: false,
@@ -216,6 +228,7 @@ impl App {
             update: Arc::new(Mutex::new(update::State::Idle)),
             update_manual: false,
         };
+        app.ensure_outputs();
         if app.prefs.check_updates {
             update::check(&app.update, &cc.egui_ctx);
         }
@@ -232,33 +245,106 @@ impl App {
         self.slots[c].clip().is_some()
     }
 
-    /// Frames of all loaded clips in a bank.
+    /// Frames of all loaded cues in a bank (in/out points applied), at the bank's device rate.
     fn bank_total(&self, bank: usize) -> u64 {
         let cues = bank * CUES_PER_BANK..(bank + 1) * CUES_PER_BANK;
-        cues.filter_map(|c| self.slots[c].clip().map(|k| k.frames() as u64)).sum()
+        cues.filter_map(|c| self.cue_frames(c)).sum()
     }
 
-    fn rate(&self) -> u32 {
-        self.engine.as_ref().map(|e| e.rate).unwrap_or(0)
+    fn bank_rate(&self, bank: usize) -> u64 {
+        self.rate_for(bank * CUES_PER_BANK).max(1) as u64
     }
 
-    fn send(&mut self, cmd: Cmd) {
-        if let Some(e) = &mut self.engine {
-            e.send(cmd);
+    /// Device a bank plays on: its own choice, else the default output from Preferences.
+    fn bank_key(&self, bank: usize) -> Option<String> {
+        self.project.banks[bank].output.clone().or_else(|| self.prefs.device.clone())
+    }
+
+    fn wanted_keys(&self) -> Vec<Option<String>> {
+        let mut keys: Vec<Option<String>> = Vec::new();
+        for b in 0..BANKS {
+            let k = self.bank_key(b);
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        keys
+    }
+
+    /// Open the devices the banks need, close the ones nobody uses.
+    fn ensure_outputs(&mut self) {
+        let wanted = self.wanted_keys();
+        self.outputs.retain(|o| wanted.contains(&o.key));
+        let mut errors = Vec::new();
+        for key in &wanted {
+            if self.outputs.iter().any(|o| &o.key == key) {
+                continue;
+            }
+            match Engine::open(key.as_deref()) {
+                Ok(engine) => self.outputs.push(Output { key: key.clone(), engine, seen_starts: 0, seen_autostarts: 0 }),
+                Err(e) => errors.push(e),
+            }
+        }
+        for o in &self.outputs {
+            if let Some(k) = &o.key
+                && *k != o.engine.device_name
+            {
+                errors.push(format!("{k} not found, playing on {}", o.engine.device_name));
+            }
+        }
+        self.audio_error = (!errors.is_empty()).then(|| errors.join("  ·  "));
+        self.last_wanted = wanted;
+        self.last_reconnect = Instant::now();
+        self.display = self.display.min(self.outputs.len().saturating_sub(1));
+        self.sync_slots();
+        self.plan_dirty = true;
+    }
+
+    fn out_index(&self, c: CueId) -> Option<usize> {
+        let key = self.bank_key(c / CUES_PER_BANK);
+        self.outputs.iter().position(|o| o.key == key)
+    }
+
+    /// Sample rate of the device cue `c` plays on (0 = no device).
+    fn rate_for(&self, c: CueId) -> u32 {
+        self.out_index(c).map(|i| self.outputs[i].engine.rate).unwrap_or(0)
+    }
+
+    /// Play range of a loaded cue in frames (in/out points applied).
+    fn cue_range(&self, c: CueId) -> Option<(usize, usize)> {
+        let frames = self.slots[c].clip()?.frames();
+        let rate = self.rate_for(c) as f64;
+        let cue = &self.project.cues[c];
+        let start = ((cue.start.max(0.0) * rate) as usize).min(frames.saturating_sub(1));
+        let end = if cue.end > 0.0 { ((cue.end * rate) as usize).clamp(start + 1, frames) } else { frames };
+        Some((start, end))
+    }
+
+    fn cue_frames(&self, c: CueId) -> Option<u64> {
+        self.cue_range(c).map(|(s, e)| (e - s) as u64)
+    }
+
+    fn send_all(&mut self, cmd: impl Fn(u32) -> Cmd) {
+        for o in &mut self.outputs {
+            o.engine.send(cmd(o.engine.rate));
         }
     }
 
+    fn display_rate(&self) -> u64 {
+        self.outputs.get(self.display).map(|o| o.engine.rate).unwrap_or(48_000) as u64
+    }
+
+    /// What the clocks show: the output that started a cue last, else any output still playing.
     fn status(&self) -> Snapshot {
-        match &self.engine {
-            Some(e) => e.status.snapshot(),
-            None => Snapshot { cue: None, pos: 0, len: 0, paused: false },
-        }
+        let snaps: Vec<Snapshot> = self.outputs.iter().map(|o| o.engine.status.snapshot()).collect();
+        let pick = snaps.iter().position(|s| s.cue.is_some()).filter(|_| snaps.get(self.display).is_none_or(|s| s.cue.is_none()));
+        snaps.into_iter().nth(pick.unwrap_or(self.display)).unwrap_or(Snapshot { cue: None, pos: 0, len: 0, paused: false })
     }
 
     /// Start decoding every cue whose file or output rate changed.
     fn sync_slots(&mut self) {
-        let rate = self.rate();
         for c in 0..CUE_COUNT {
+            let rate = self.rate_for(c);
             let path = self.project.cues[c].path.clone();
             let slot = &self.slots[c];
             if slot.path == path && (slot.rate == rate || path.is_empty()) {
@@ -284,12 +370,32 @@ impl App {
 
     fn rebuild_plan(&mut self) {
         let has = |c: CueId| self.has_clip(c);
-        let plan = Plan {
-            clips: self.slots.iter().map(|s| s.clip().cloned()).collect(),
-            next: (0..CUE_COUNT).map(|c| self.project.follower(c, has)).collect(),
-            loop_cue: self.project.playback.loop_cue,
-        };
-        self.send(Cmd::SetPlan(Arc::new(plan)));
+        let plans: Vec<Plan> = (0..self.outputs.len())
+            .map(|i| {
+                let rate = self.outputs[i].engine.rate as f32;
+                let mut plan = Plan::empty();
+                plan.loop_cue = self.project.playback.loop_cue;
+                for c in (0..CUE_COUNT).filter(|&c| self.out_index(c) == Some(i)) {
+                    let (Some(clip), Some((start, end))) = (self.slots[c].clip(), self.cue_range(c)) else { continue };
+                    let cue = &self.project.cues[c];
+                    plan.cues[c] = Some(PlanCue {
+                        clip: clip.clone(),
+                        gain: 10f32.powf(cue.gain_db / 20.0),
+                        fade_in: (cue.fade_in.max(0.0) * rate) as u32,
+                        fade_out: (cue.fade_out.max(0.0) * rate) as u32,
+                        start,
+                        end,
+                        layer: cue.layer,
+                        channel: self.project.banks[c / CUES_PER_BANK].channel,
+                        next: self.project.follower(c, has),
+                    });
+                }
+                plan
+            })
+            .collect();
+        for (o, plan) in self.outputs.iter_mut().zip(plans) {
+            o.engine.send(Cmd::SetPlan(Arc::new(plan)));
+        }
         self.plan_dirty = false;
         // A cue that is no longer playable cannot stay preselected.
         if self.preselect.is_none_or(|p| !self.has_clip(p)) {
@@ -302,9 +408,16 @@ impl App {
     }
 
     fn fire(&mut self, cue: CueId) {
-        if self.has_clip(cue) {
-            self.send(Cmd::Fire(cue));
+        let Some(i) = self.out_index(cue).filter(|_| self.has_clip(cue)) else { return };
+        // A cue that replaces what plays must also silence the other devices.
+        if !self.project.cues[cue].layer {
+            for (j, o) in self.outputs.iter_mut().enumerate() {
+                if j != i {
+                    o.engine.send(Cmd::Cut);
+                }
+            }
         }
+        self.outputs[i].engine.send(Cmd::Fire(cue));
     }
 
     fn go(&mut self) {
@@ -314,8 +427,16 @@ impl App {
     }
 
     fn stop(&mut self) {
-        let fade_frames = (self.prefs.stop_fade_ms as u64 * self.rate() as u64 / 1000) as u32;
-        self.send(Cmd::Stop { fade_frames });
+        let ms = self.prefs.stop_fade_ms as u64;
+        self.send_all(|rate| Cmd::Stop { fade_frames: (ms * rate as u64 / 1000) as u32 });
+    }
+
+    fn fade_out(&mut self) {
+        self.send_all(|_| Cmd::FadeOut);
+    }
+
+    fn toggle_pause(&mut self) {
+        self.send_all(|_| Cmd::TogglePause);
     }
 
     fn step_preselect(&mut self, forward: bool) {
@@ -355,7 +476,10 @@ impl App {
         if arm.is_none() {
             self.armed = None;
         }
-        self.send(Cmd::Arm(arm));
+        let target = arm.and_then(|(_, cue)| self.out_index(cue));
+        for (i, o) in self.outputs.iter_mut().enumerate() {
+            o.engine.send(Cmd::Arm(arm.filter(|_| Some(i) == target)));
+        }
     }
 
     fn to_go(&self) -> String {
@@ -381,7 +505,7 @@ impl App {
     fn run_pending(&mut self, p: Pending) {
         match p {
             Pending::New => {
-                self.send(Cmd::Stop { fade_frames: 0 });
+                self.send_all(|_| Cmd::Stop { fade_frames: 0 });
                 self.project = Project::default();
                 self.file = None;
                 self.dirty = false;
@@ -412,7 +536,7 @@ impl App {
     fn open_path(&mut self, path: &Path) {
         match Project::load(path) {
             Ok(p) => {
-                self.send(Cmd::Stop { fade_frames: 0 });
+                self.send_all(|_| Cmd::Stop { fade_frames: 0 });
                 self.project = p;
                 self.file = Some(path.to_path_buf());
                 self.dirty = false;
@@ -488,19 +612,11 @@ impl App {
         self.plan_dirty = true;
     }
 
+    /// Default output changed in Preferences: reopen every device.
     fn reopen_audio(&mut self) {
-        self.engine = None; // close the old stream before opening the device again
+        self.outputs.clear(); // close the old streams before opening the devices again
         self.devices = output_device_names();
-        match Engine::open(self.prefs.device.as_deref()) {
-            Ok(e) => {
-                self.engine = Some(e);
-                self.audio_error = None;
-                self.sync_slots();
-                self.plan_dirty = true;
-            }
-            Err(e) => self.audio_error = Some(e),
-        }
-        self.last_reconnect = Instant::now();
+        self.ensure_outputs();
     }
 
     // ------------------------------------------------- per-frame background
@@ -521,30 +637,53 @@ impl App {
             self.rebuild_plan();
         }
 
-        let lost = self.engine.as_ref().is_some_and(|e| e.status.stream_error.load(std::sync::atomic::Ordering::Relaxed));
-        if lost {
-            self.audio_error = Some("Audio device lost. Reconnecting...".into());
+        use std::sync::atomic::Ordering::Relaxed;
+        let before = self.outputs.len();
+        self.outputs.retain(|o| !o.engine.status.stream_error.load(Relaxed));
+        if self.outputs.len() != before {
             // Clips are kept: sync_slots() only re-decodes if the new device runs at another rate.
-            self.engine = None;
+            self.audio_error = Some("Audio device lost. Reconnecting...".into());
+            self.last_reconnect = Instant::now();
         }
-        if self.engine.is_none() && self.last_reconnect.elapsed() > Duration::from_secs(2) {
-            self.reopen_audio();
+        let wanted = self.wanted_keys();
+        let missing = wanted.iter().any(|k| !self.outputs.iter().any(|o| &o.key == k));
+        let unused = self.outputs.iter().any(|o| !wanted.contains(&o.key));
+        if unused || (missing && (wanted != self.last_wanted || self.last_reconnect.elapsed() > Duration::from_secs(2))) {
+            self.ensure_outputs();
         }
 
-        let (starts, autostarts) = match &mut self.engine {
-            Some(e) => {
-                e.collect_garbage();
-                let st = &e.status;
-                (st.starts.load(std::sync::atomic::Ordering::Relaxed), st.autostarted.load(std::sync::atomic::Ordering::Relaxed))
+        let master = self.prefs.master.clamp(0.0, 1.0).to_bits();
+        let mut follows = Vec::new();
+        let mut started = None;
+        let (mut peak_l, mut peak_r) = (0.0f32, 0.0f32);
+        for (i, o) in self.outputs.iter_mut().enumerate() {
+            o.engine.collect_garbage();
+            let st = &o.engine.status;
+            st.master.store(master, Relaxed);
+            let (l, r) = st.take_peaks();
+            (peak_l, peak_r) = (peak_l.max(l), peak_r.max(r));
+            let follow = st.follow.swap(NONE, Relaxed);
+            if follow != NONE {
+                follows.push(follow);
             }
-            None => (self.seen_starts, self.seen_autostarts),
-        };
-        if autostarts != self.seen_autostarts {
-            self.seen_autostarts = autostarts;
-            self.armed = None;
+            let auto = st.autostarted.load(Relaxed);
+            if auto != o.seen_autostarts {
+                o.seen_autostarts = auto;
+                self.armed = None;
+            }
+            let starts = st.starts.load(Relaxed);
+            if starts != o.seen_starts {
+                o.seen_starts = starts;
+                started = Some(i);
+            }
         }
-        if starts != self.seen_starts {
-            self.seen_starts = starts;
+        // Meter falls back at about 20 dB per second at 60 fps.
+        self.meter = (peak_l.max(self.meter.0 * 0.94), peak_r.max(self.meter.1 * 0.94));
+        for n in follows {
+            self.fire(n); // linked cue that lives on another device
+        }
+        if let Some(i) = started {
+            self.display = i;
             let pb = &self.project.playback;
             if pb.auto_preselect
                 && let Some(cur) = self.status().cue
@@ -562,7 +701,9 @@ impl App {
         let busy = self.status().cue.is_some()
             || self.armed.is_some()
             || self.slots.iter().any(|s| matches!(s.state, SlotState::Loading))
-            || self.engine.is_none();
+            || self.meter.0 > 0.001
+            || self.outputs.is_empty()
+            || self.audio_error.is_some();
         if busy {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
@@ -593,6 +734,7 @@ impl App {
                         | Key::Enter
                         | Key::Escape
                         | Key::P
+                        | Key::F
                         | Key::ArrowUp
                         | Key::ArrowDown
                         | Key::ArrowLeft
@@ -620,7 +762,8 @@ impl App {
             match key {
                 Key::Space | Key::Enter => self.go(),
                 Key::Escape => self.stop(),
-                Key::P => self.send(Cmd::TogglePause),
+                Key::P => self.toggle_pause(),
+                Key::F => self.fade_out(),
                 Key::ArrowUp => self.step_preselect(false),
                 Key::ArrowDown => self.step_preselect(true),
                 Key::ArrowLeft | Key::PageUp => self.view_bank = self.view_bank.saturating_sub(1),
@@ -745,7 +888,7 @@ impl App {
     }
 
     fn show_header(&mut self, ui: &mut Ui, snap: &Snapshot) {
-        let rate = self.rate().max(1) as u64;
+        let rate = self.display_rate();
         let full = ui.available_rect_before_wrap();
         let transport_w = 330.0;
         let left = Rect::from_min_max(full.min, pos2(full.max.x - transport_w - 12.0, full.max.y));
@@ -781,7 +924,7 @@ impl App {
         for (txt, dx) in [("min", 0.0), ("sec", 26.0), ("msec", 52.0)] {
             p.text(pos2(bx + dx, y0 + 17.0), Align2::LEFT_TOP, txt, FontId::proportional(9.0), GREY);
         }
-        p.text(pos2(bx, y0 + 26.0), Align2::LEFT_TOP, fmt_time(tot, rate), FontId::monospace(20.0), WHITE);
+        p.text(pos2(bx, y0 + 26.0), Align2::LEFT_TOP, fmt_time(tot, self.bank_rate(self.view_bank)), FontId::monospace(20.0), WHITE);
 
         // Now playing.
         if let Some(c) = snap.cue {
@@ -820,7 +963,7 @@ impl App {
             if resp.clicked() {
                 match icon {
                     Icon::Stop => self.stop(),
-                    Icon::Pause => self.send(Cmd::TogglePause),
+                    Icon::Pause => self.toggle_pause(),
                     Icon::Prev => self.step_preselect(false),
                     Icon::Next => self.step_preselect(true),
                 }
@@ -894,10 +1037,9 @@ impl App {
                 SlotState::Empty => (String::new(), DIM),
                 SlotState::Loading => ("loading…".into(), GREY),
                 SlotState::Failed(_) => ("MISSING".into(), Color32::from_rgb(0xff, 0x80, 0x40)),
-                SlotState::Ready(c) => {
-                    let rate = self.rate().max(1) as u64;
-                    let t = if playing { snap.len.saturating_sub(snap.pos) } else { c.frames() as u64 };
-                    (fmt_time(t, rate), WHITE)
+                SlotState::Ready(_) => {
+                    let t = if playing { snap.len.saturating_sub(snap.pos) } else { self.cue_frames(id).unwrap_or(0) };
+                    (fmt_time(t, self.rate_for(id).max(1) as u64), WHITE)
                 }
             };
             p.text(pos2(r.max.x - 14.0, info_y), Align2::RIGHT_CENTER, right_text, FontId::monospace(name_size * 0.85), right_color);
@@ -1031,12 +1173,12 @@ impl App {
                     ui.label(egui::RichText::new("Configuration Matrix").color(Color32::from_gray(0xd0)).size(18.0));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let shown = if snap.cue.is_some() { snap.pos } else { 0 };
-                        ui.label(egui::RichText::new(fmt_time(shown, self.rate().max(1) as u64)).monospace().size(20.0).color(WHITE));
+                        ui.label(egui::RichText::new(fmt_time(shown, self.display_rate())).monospace().size(20.0).color(WHITE));
                         ui.label(egui::RichText::new("CLIP\nElapsed").size(10.0).color(Color32::from_gray(0xc0)));
                         let (r, resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
                         draw_icon(ui.painter(), r.center(), Icon::Pause, if snap.paused { RED } else { WHITE });
                         if resp.on_hover_text("Pause / resume").clicked() {
-                            self.send(Cmd::TogglePause);
+                            self.toggle_pause();
                         }
                         let (r, resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
                         draw_icon(ui.painter(), r.center(), Icon::Stop, WHITE);
@@ -1219,28 +1361,42 @@ impl App {
     }
 
     fn bank_table(&mut self, ui: &mut Ui) {
-        let rate = self.rate().max(1) as u64;
-        egui::Grid::new("banks").striped(true).spacing(vec2(14.0, 4.0)).show(ui, |ui| {
-            for h in ["Bank", "Link Cues", "Link Bank", "Loop Bank", "Bank Name", "Length"] {
+        egui::Grid::new("banks").striped(true).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
+            for h in ["Bank", "Link Cues", "Link Bank", "Loop Bank", "Bank Name", "Audio Out", "Outputs", "Length"] {
                 ui.strong(h);
             }
             ui.end_row();
             for b in 0..BANKS {
+                let channels = self.out_index(b * CUES_PER_BANK).map(|i| self.outputs[i].engine.channels).unwrap_or(2);
+                let (tot, rate) = (self.bank_total(b), self.bank_rate(b));
                 ui.label(bank_letter(b).to_string());
                 let bank = &mut self.project.banks[b];
                 ui.checkbox(&mut bank.link_cues, "");
                 ui.checkbox(&mut bank.link_bank, "");
                 ui.checkbox(&mut bank.loop_bank, "");
-                ui.add(egui::TextEdit::singleline(&mut bank.name).desired_width(160.0));
-                let tot = self.bank_total(b);
+                ui.add(egui::TextEdit::singleline(&mut bank.name).desired_width(110.0).hint_text(format!("Bank {}", bank_letter(b))));
+                egui::ComboBox::from_id_salt(("out", b))
+                    .width(150.0)
+                    .truncate()
+                    .selected_text(bank.output.clone().unwrap_or_else(|| "Default".into()))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut bank.output, None, "Default");
+                        for d in &self.devices {
+                            ui.selectable_value(&mut bank.output, Some(d.clone()), d);
+                        }
+                    });
+                let pair = |c: usize| format!("{}-{}", c + 1, c + 2);
+                egui::ComboBox::from_id_salt(("ch", b)).width(48.0).selected_text(pair(bank.channel)).show_ui(ui, |ui| {
+                    for c in (0..channels.max(2) - 1).step_by(2) {
+                        ui.selectable_value(&mut bank.channel, c, pair(c));
+                    }
+                });
                 ui.monospace(if tot == 0 { "--:--:---".into() } else { fmt_time(tot, rate) });
                 ui.end_row();
             }
         });
-        ui.label(format!(
-            "Audio out: {}",
-            self.engine.as_ref().map(|e| format!("{} ({} Hz)", e.device_name, e.rate)).unwrap_or_else(|| "none".into())
-        ));
+        let outs: Vec<String> = self.outputs.iter().map(|o| format!("{} ({} Hz, {} ch)", o.engine.device_name, o.engine.rate, o.engine.channels)).collect();
+        ui.label(format!("Playing on: {}", if outs.is_empty() { "no device".into() } else { outs.join(", ") }));
     }
 
     fn playback_box(&mut self, ui: &mut Ui) {
@@ -1284,7 +1440,8 @@ impl App {
 
     fn cue_table(&mut self, ui: &mut Ui, snap: &Snapshot) {
         use egui_extras::{Column, TableBuilder};
-        let rate = self.rate().max(1) as u64;
+        let lengths: Vec<Option<String>> =
+            (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.rate_for(c).max(1) as u64))).collect();
         let mut browse = None;
         let mut reset = None;
         let mut preview = None;
@@ -1346,7 +1503,7 @@ impl App {
                     let slot = &self.slots[c];
                     row.col(|ui| {
                         ui.monospace(match &slot.state {
-                            SlotState::Ready(clip) => fmt_time(clip.frames() as u64, rate),
+                            SlotState::Ready(_) => lengths[c].clone().unwrap_or_default(),
                             SlotState::Loading => "loading…".into(),
                             _ => "--:--:---".into(),
                         });
