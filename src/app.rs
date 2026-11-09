@@ -47,11 +47,14 @@ pub struct Prefs {
     /// Master volume 0..1.
     pub master: f32,
     pub edit_dark: bool,
+    pub midi_port: Option<String>,
+    /// Learned MIDI triggers for GO, Stop, Fade out.
+    pub midi_triggers: [Option<crate::midi::Trigger>; 3],
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true, master: 1.0, edit_dark: true }
+        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true, master: 1.0, edit_dark: true, midi_port: None, midi_triggers: [None; 3] }
     }
 }
 
@@ -175,6 +178,11 @@ pub struct App {
     meter: (f32, f32),
     /// Which waveform marker the mouse is dragging: true = out point.
     drag_out: bool,
+    midi: Option<crate::midi::Midi>,
+    midi_error: Option<String>,
+    midi_ports: Vec<String>,
+    /// Action waiting for the next MIDI message (index into `midi::ACTIONS`).
+    midi_learn: Option<usize>,
     undo: Vec<Project>,
     redo: Vec<Project>,
     /// Edits closer together than this become one undo step (typing a name).
@@ -217,6 +225,10 @@ impl App {
             last_wanted: Vec::new(),
             meter: (0.0, 0.0),
             drag_out: false,
+            midi: None,
+            midi_error: None,
+            midi_ports: Vec::new(),
+            midi_learn: None,
             undo: Vec::new(),
             redo: Vec::new(),
             last_undo_push: Instant::now(),
@@ -243,6 +255,7 @@ impl App {
             update_manual: false,
         };
         app.ensure_outputs();
+        app.connect_midi(&cc.egui_ctx);
         if app.prefs.check_updates {
             update::check(&app.update, &cc.egui_ctx);
         }
@@ -638,6 +651,7 @@ impl App {
     // ------------------------------------------------- per-frame background
 
     fn background(&mut self, ctx: &egui::Context) {
+        self.handle_midi();
         while let Ok(done) = self.loader.done.try_recv() {
             // Job ids are unique; matching on them survives Up/Down swapping slots mid-decode.
             let Some(slot) = self.slots.iter_mut().find(|s| s.generation == done.generation) else {
@@ -867,6 +881,33 @@ impl App {
                 if sel_down {
                     self.selected = (self.selected + 1).min(CUE_COUNT - 1);
                 }
+            }
+        }
+    }
+
+    fn connect_midi(&mut self, ctx: &egui::Context) {
+        self.midi = None;
+        self.midi_error = None;
+        if let Some(name) = self.prefs.midi_port.clone() {
+            match crate::midi::connect(&name, ctx.clone()) {
+                Ok(m) => self.midi = Some(m),
+                Err(e) => self.midi_error = Some(e),
+            }
+        }
+    }
+
+    fn handle_midi(&mut self) {
+        let triggers: Vec<crate::midi::Trigger> = self.midi.as_ref().map(|m| m.rx.try_iter().collect()).unwrap_or_default();
+        for t in triggers {
+            if let Some(action) = self.midi_learn.take() {
+                self.prefs.midi_triggers[action] = Some(t);
+                continue;
+            }
+            match self.prefs.midi_triggers.iter().position(|&x| x == Some(t)) {
+                Some(0) => self.go(),
+                Some(1) => self.stop(),
+                Some(2) => self.fade_out(),
+                _ => {}
             }
         }
     }
@@ -1361,6 +1402,46 @@ impl App {
         });
     }
 
+    fn midi_menu(&mut self, ui: &mut Ui) {
+        if self.midi_ports.is_empty() {
+            self.midi_ports = crate::midi::port_names();
+        }
+        ui.label("MIDI input");
+        let mut choice = self.prefs.midi_port.clone();
+        ui.radio_value(&mut choice, None, "None");
+        for name in &self.midi_ports {
+            ui.radio_value(&mut choice, Some(name.clone()), name);
+        }
+        if ui.button("Refresh device list").clicked() {
+            self.midi_ports = crate::midi::port_names();
+        }
+        if choice != self.prefs.midi_port {
+            self.prefs.midi_port = choice;
+            self.connect_midi(ui.ctx());
+        }
+        if let Some(e) = &self.midi_error {
+            ui.colored_label(Color32::from_rgb(0xe0, 0x40, 0x40), e);
+        }
+        ui.separator();
+        ui.add_enabled_ui(self.midi.is_some(), |ui| {
+            egui::Grid::new("midi_map").show(ui, |ui| {
+                for (i, action) in crate::midi::ACTIONS.iter().enumerate() {
+                    ui.label(*action);
+                    let learning = self.midi_learn == Some(i);
+                    let current = self.prefs.midi_triggers[i].map(crate::midi::describe).unwrap_or_else(|| "—".into());
+                    ui.label(if learning { "press a pad or pedal…".into() } else { current });
+                    if ui.selectable_label(learning, "Learn").clicked() {
+                        self.midi_learn = if learning { None } else { Some(i) };
+                    }
+                    if ui.small_button("Clear").clicked() {
+                        self.prefs.midi_triggers[i] = None;
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+    }
+
     /// Bottom of Edit Mode: everything about the selected cue.
     fn cue_inspector(&mut self, ui: &mut Ui) {
         let c = self.selected;
@@ -1579,6 +1660,8 @@ impl App {
                 ui.checkbox(&mut self.prefs.keep_awake, "Keep screen awake in Show Mode");
                 ui.checkbox(&mut self.prefs.check_updates, "Check for updates at startup");
                 ui.checkbox(&mut self.prefs.edit_dark, "Dark Edit Mode");
+                ui.separator();
+                ui.menu_button("MIDI remote", |ui| self.midi_menu(ui));
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("Keyboard shortcuts").clicked() {
