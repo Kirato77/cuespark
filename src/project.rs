@@ -36,7 +36,7 @@ impl Bank {
     /// Name shown on tabs: unnamed banks read "Bank D", not "--".
     pub fn label(&self, index: usize) -> String {
         match self.name.trim() {
-            "" | "--" => format!("Bank {}", bank_letter(index)),
+            "" | "--" => format!("{} {}", crate::i18n::tr("Bank"), bank_letter(index)),
             n => n.to_string(),
         }
     }

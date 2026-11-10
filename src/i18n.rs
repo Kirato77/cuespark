@@ -1,0 +1,257 @@
+//! UI language: English (default) or French. `tr("English text")` returns the
+//! translation when French is on, else the text itself.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+
+static FRENCH: AtomicBool = AtomicBool::new(false);
+
+pub fn set_french(on: bool) {
+    FRENCH.store(on, Relaxed);
+}
+
+pub fn tr(en: &'static str) -> &'static str {
+    if !FRENCH.load(Relaxed) {
+        return en;
+    }
+    static FR: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    FR.get_or_init(|| FRENCH_TEXT.iter().copied().collect()).get(en).copied().unwrap_or(en)
+}
+
+const FRENCH_TEXT: &[(&str, &str)] = &[
+    // Show Mode
+    ("Edit Mode", "Mode Edit"),
+    ("Show Mode", "Mode Show"),
+    ("NEXT  (Space)", "SUIVANT  (Espace)"),
+    ("Elapsed / remaining (Tab)", "Écoulé / restant (Tab)"),
+    ("PAUSED", "PAUSE"),
+    ("PLAYING", "EN COURS"),
+    ("Stop (Esc, twice = cut)", "Stop (Échap, deux fois = coupe)"),
+    ("Fade out with each cue's fade-out time (F)", "Fondu de sortie, avec le temps de chaque cue (F)"),
+    ("Pause / resume (P)", "Pause / reprise (P)"),
+    ("Preselect previous cue (Up arrow)", "Présélectionner le cue précédent (flèche haut)"),
+    ("Preselect next cue (Down arrow)", "Présélectionner le cue suivant (flèche bas)"),
+    ("OVER", "SUPERP."),
+    ("(no name)", "(sans nom)"),
+    ("loading…", "chargement…"),
+    ("MISSING", "MANQUANT"),
+    ("Click: fire · Right-click: preselect", "Clic : lancer · Clic droit : présélectionner"),
+    ("LEVEL", "NIVEAU"),
+    ("Master volume (all outputs)", "Volume général (toutes les sorties)"),
+    ("BANK SETTINGS", "BANQUE"),
+    ("PLAYBACK SETTINGS", "LECTURE"),
+    ("LINK CUES", "LIER CUES"),
+    ("Linked cues start the next one when they end", "Un cue lié lance le suivant quand il se termine"),
+    ("LOOP BNK", "BOUCLE BQ"),
+    ("After the last cue, go back to the first cue of this bank", "Après le dernier cue, revenir au premier de la banque"),
+    ("LINK BNK", "LIER BQ"),
+    ("After the last cue, continue with the next bank", "Après le dernier cue, continuer sur la banque suivante"),
+    ("LOOP CUE", "BOUCLE CUE"),
+    ("Repeat the playing cue until stopped", "Répéter le cue en cours jusqu'au stop"),
+    ("PRESL NXT", "PRÉSÉL. SUIV"),
+    ("Automatically preselect the next cue", "Présélectionner automatiquement le cue suivant"),
+    ("AUTO STRT", "DÉPART AUTO"),
+    ("Arm the automatic start (set the time in Edit Mode)", "Armer le départ automatique (heure réglée en mode Edit)"),
+    ("CUE INFORMATION", "INFOS CUE"),
+    // Edit Mode
+    ("New", "Nouveau"),
+    ("New (Ctrl+N)", "Nouveau (Ctrl+N)"),
+    ("Open", "Ouvrir"),
+    ("Open (Ctrl+O)", "Ouvrir (Ctrl+O)"),
+    ("Save", "Enregistrer"),
+    ("Save (Ctrl+S)", "Enregistrer (Ctrl+S)"),
+    ("Configuration Matrix", "Matrice de configuration"),
+    ("CLIP\nElapsed", "CLIP\nÉcoulé"),
+    ("Pause / resume", "Pause / reprise"),
+    ("Stop (Esc)", "Stop (Échap)"),
+    ("Project:", "Projet :"),
+    ("Date of last change:", "Dernière modification :"),
+    ("Date of creation:", "Création :"),
+    ("Bank Settings", "Banques"),
+    ("Playback Settings", "Lecture"),
+    ("Cue Settings", "Cues"),
+    ("Up", "Monter"),
+    ("Move cue up (Alt+Up)", "Monter le cue (Alt+Haut)"),
+    ("Down", "Descendre"),
+    ("Move cue down (Alt+Down)", "Descendre le cue (Alt+Bas)"),
+    ("Volume", "Volume"),
+    ("Fade in", "Fondu entrée"),
+    ("Fade out", "Fondu sortie"),
+    ("Used by the F key and the Fade button", "Utilisé par la touche F et le bouton FADE"),
+    ("Play over other cues", "Jouer par-dessus les autres cues"),
+    ("Keep what is playing instead of replacing it", "Garder ce qui joue au lieu de le remplacer"),
+    ("In", "Entrée"),
+    ("Out", "Sortie"),
+    ("Reset", "Réinitialiser"),
+    ("Play the whole file", "Jouer tout le fichier"),
+    ("Drag the red markers on the waveform", "Faites glisser les repères rouges sur la forme d'onde"),
+    ("Cue information (shown in Show Mode when preselected)", "Infos du cue (affichées en mode Show quand il est présélectionné)"),
+    ("Script line, stage cue, reminder…", "Réplique, top, rappel…"),
+    ("No audio loaded", "Aucun son chargé"),
+    ("Bank", "Banque"),
+    ("Link Cues", "Lier cues"),
+    ("Link Bank", "Lier banque"),
+    ("Loop Bank", "Boucle banque"),
+    ("Bank Name", "Nom"),
+    ("Audio Out", "Sortie audio"),
+    ("Outputs", "Canaux"),
+    ("Length", "Durée"),
+    ("Default", "Par défaut"),
+    ("Playing on:", "Lecture sur :"),
+    ("no device", "aucun périphérique"),
+    ("Automatic Preselection", "Présélection automatique"),
+    ("Preselect next Cue", "Présélectionner le cue suivant"),
+    ("Preselect current Cue", "Présélectionner le cue en cours"),
+    ("Automatic Start", "Départ automatique"),
+    ("Start time:", "Heure de départ :"),
+    ("use HH:MM", "format HH:MM"),
+    ("To go:", "Dans :"),
+    ("Disarm", "Désarmer"),
+    ("Arm", "Armer"),
+    ("When armed, the preselected cue fires at the start time", "Une fois armé, le cue présélectionné part à l'heure de départ"),
+    ("Link", "Lien"),
+    ("Cue Name", "Nom du cue"),
+    ("Audio file", "Fichier audio"),
+    ("Size", "Taille"),
+    ("Type", "Type"),
+    ("Choose audio file", "Choisir un fichier audio"),
+    ("Clear this cue (Del)", "Vider ce cue (Suppr)"),
+    // Status bar
+    ("Show Mode is active", "Mode Show actif"),
+    ("Edit Mode is active", "Mode Edit actif"),
+    ("Loading clips", "Chargement des sons"),
+    ("Missing or unreadable clips", "Sons manquants ou illisibles"),
+    ("AUTO START in", "DÉPART AUTO dans"),
+    ("Audio device lost. Reconnecting...", "Périphérique audio perdu. Reconnexion…"),
+    ("not found, playing on", "introuvable, lecture sur"),
+    ("no audio device", "aucun périphérique audio"),
+    ("file not found", "fichier introuvable"),
+    // Menus
+    ("File", "Fichier"),
+    ("New            Ctrl+N", "Nouveau            Ctrl+N"),
+    ("Open…          Ctrl+O", "Ouvrir…             Ctrl+O"),
+    ("Open recent", "Ouvrir un show récent"),
+    ("Save           Ctrl+S", "Enregistrer         Ctrl+S"),
+    ("Save as…  Ctrl+Shift+S", "Enregistrer sous…  Ctrl+Maj+S"),
+    ("Export cue list…", "Exporter la conduite…"),
+    ("Printable page (save as PDF from the browser) or CSV", "Page imprimable (PDF depuis le navigateur) ou CSV"),
+    ("Quit", "Quitter"),
+    ("Project", "Projet"),
+    ("Undo   Ctrl+Z", "Annuler   Ctrl+Z"),
+    ("Redo   Ctrl+Y", "Rétablir   Ctrl+Y"),
+    ("Collect audio into show folder", "Rassembler les sons dans le dossier du show"),
+    ("Copy every file next to the show, to move it to another PC", "Copier tous les fichiers à côté du show, pour le déplacer sur un autre PC"),
+    ("Find missing files…", "Retrouver les fichiers manquants…"),
+    ("Reload all audio files", "Recharger tous les sons"),
+    ("Reopen last show at startup", "Rouvrir le dernier show au démarrage"),
+    ("Preferences", "Préférences"),
+    ("Audio output", "Sortie audio par défaut"),
+    ("System default", "Celle du système"),
+    ("Refresh device list", "Actualiser la liste"),
+    ("Stop fade (Esc)", "Fondu du stop (Échap)"),
+    ("Keep screen awake in Show Mode", "Garder l'écran allumé en mode Show"),
+    ("Check for updates at startup", "Chercher les mises à jour au démarrage"),
+    ("Dark Edit Mode", "Mode Edit sombre"),
+    ("MIDI remote", "Télécommande MIDI"),
+    ("MIDI input", "Entrée MIDI"),
+    ("None", "Aucune"),
+    ("press a pad or pedal…", "appuyez sur un pad ou une pédale…"),
+    ("Learn", "Apprendre"),
+    ("Clear", "Effacer"),
+    ("GO", "GO"),
+    ("Stop", "Stop"),
+    ("Help", "Aide"),
+    ("Keyboard shortcuts", "Raccourcis clavier"),
+    ("Check for updates", "Chercher une mise à jour"),
+    ("About", "À propos"),
+    ("Language", "Langue"),
+    // Updates
+    ("Checking for updates…", "Recherche de mise à jour…"),
+    ("up to date", "à jour"),
+    ("Update failed", "Échec de la mise à jour"),
+    ("Update to", "Mettre à jour vers"),
+    ("Download and install the new version", "Télécharger et installer la nouvelle version"),
+    ("Update", "Mise à jour"),
+    ("Stop playback first.", "Arrêtez d'abord la lecture."),
+    ("Save the show first (Ctrl+S).", "Enregistrez d'abord le show (Ctrl+S)."),
+    ("Downloading", "Téléchargement de"),
+    ("Restart to use", "Redémarrer pour utiliser"),
+    ("Restart failed", "Échec du redémarrage"),
+    // Dialogs
+    ("Unsaved changes", "Modifications non enregistrées"),
+    ("Save changes to", "Enregistrer les modifications de"),
+    ("Discard", "Ne pas enregistrer"),
+    ("Cancel", "Annuler"),
+    ("Really quit? Playback stops immediately.", "Vraiment quitter ? La lecture s'arrête immédiatement."),
+    ("Close", "Fermer"),
+    ("Cannot open show", "Impossible d'ouvrir le show"),
+    ("Save failed", "Échec de l'enregistrement"),
+    ("Collect audio", "Rassembler les sons"),
+    ("Save the show first: the audio goes into an Audio folder next to it.", "Enregistrez d'abord le show : les sons iront dans un dossier Audio à côté."),
+    ("Files copied:", "Fichiers copiés :"),
+    ("Failed:", "Échecs :"),
+    ("Folder to search for missing audio", "Dossier où chercher les sons manquants"),
+    ("Find missing files", "Retrouver les fichiers manquants"),
+    ("Found:", "Trouvés :"),
+    ("still missing:", "toujours manquants :"),
+    ("Printable page (HTML)", "Page imprimable (HTML)"),
+    ("Spreadsheet (CSV)", "Tableur (CSV)"),
+    ("cue list", "conduite"),
+    ("Export failed", "Échec de l'export"),
+    ("Instant playback of show sound cues.", "Lecture instantanée des cues son d'un spectacle."),
+    ("Inspired by the workflow of CueFire FREE. Not affiliated with audiobytes;", "Inspiré du fonctionnement de CueFire FREE. Sans lien avec audiobytes ;"),
+    ("CueFire is their name. No code from it is used.", "CueFire est leur marque. Aucun code n'en est repris."),
+    ("Third-party licenses", "Licences tierces"),
+    ("Audio", "Audio"),
+    ("Cue Spark show", "Show Cue Spark"),
+    // Shortcuts dialog
+    ("Fire cue of the visible bank", "Lancer le cue de la banque affichée"),
+    ("Space / Enter", "Espace / Entrée"),
+    ("GO: fire the preselected cue", "GO : lancer le cue présélectionné"),
+    ("Esc", "Échap"),
+    ("Stop (with the stop fade). Twice: cut now", "Stop (avec le fondu du stop). Deux fois : coupe nette"),
+    ("Fade out (each cue's own fade-out time)", "Fondu de sortie (temps propre à chaque cue)"),
+    ("Up / Down arrows", "Flèches haut / bas"),
+    ("Preselect previous / next cue", "Présélectionner le cue précédent / suivant"),
+    ("Left / Right, 1 … 5", "Gauche / droite, 1 … 5"),
+    ("Show previous / next bank, or bank A … E", "Banque précédente / suivante, ou banque A … E"),
+    ("Elapsed / remaining time", "Temps écoulé / restant"),
+    ("Right-click a cue", "Clic droit sur un cue"),
+    ("Preselect it", "Le présélectionner"),
+    ("Enter / double-click", "Entrée / double-clic"),
+    ("Preview the selected cue", "Écouter le cue sélectionné"),
+    ("Del", "Suppr"),
+    ("Clear the selected cue", "Vider le cue sélectionné"),
+    ("Undo / redo", "Annuler / rétablir"),
+    ("Alt+Up / Alt+Down", "Alt+Haut / Alt+Bas"),
+    ("Move the selected cue", "Déplacer le cue sélectionné"),
+    ("Drop files", "Déposer des fichiers"),
+    ("Fill cues from the row under the mouse", "Remplit les cues à partir de la ligne sous la souris"),
+    ("New / open / save (Ctrl+Shift+S: save as)", "Nouveau / ouvrir / enregistrer (Ctrl+Maj+S : enregistrer sous)"),
+    ("Both modes", "Les deux modes"),
+    ("Switch Show / Edit Mode", "Basculer mode Show / Edit"),
+    // Export
+    ("Name", "Nom"),
+    ("Notes", "Notes"),
+    ("Cue list", "Conduite"),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translates_only_when_french() {
+        set_french(false);
+        assert_eq!(tr("Save"), "Save");
+        set_french(true);
+        assert_eq!(tr("Save"), "Enregistrer");
+        assert_eq!(tr("not in the table"), "not in the table");
+        set_french(false);
+        let mut seen = std::collections::HashSet::new();
+        for (en, _) in FRENCH_TEXT {
+            assert!(seen.insert(en), "duplicate entry {en}");
+        }
+    }
+}

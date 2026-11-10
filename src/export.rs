@@ -1,5 +1,6 @@
 //! Cue list export for the stage manager: CSV for spreadsheets, HTML to print or save as PDF.
 
+use crate::i18n::tr;
 use crate::project::{BANKS, CUES_PER_BANK, Project, bank_letter, cue_key};
 
 /// One line per used cue. `lengths[c]` is the formatted play length, if loaded.
@@ -36,8 +37,9 @@ pub fn html(p: &Project, lengths: &[Option<String>]) -> String {
          body{{font:14px system-ui,sans-serif;margin:24px;color:#111}}h1{{margin:0 0 4px}}\
          h2{{margin:24px 0 6px;border-bottom:2px solid #d81e1e}}table{{border-collapse:collapse;width:100%}}\
          td,th{{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:top}}th{{background:#eee}}\
-         .k{{white-space:nowrap;font-weight:600}}</style><h1>{name}</h1><p>Cue list, {date}</p>",
+         .k{{white-space:nowrap;font-weight:600}}</style><h1>{name}</h1><p>{list}, {date}</p>",
         name = esc(&p.name),
+        list = tr("Cue list"),
         date = crate::project::today()
     );
     for b in 0..BANKS {
@@ -46,9 +48,13 @@ pub fn html(p: &Project, lengths: &[Option<String>]) -> String {
             continue;
         }
         out += &format!(
-            "<h2>{} · {}</h2><table><tr><th>Cue</th><th>Name</th><th>Length</th><th>Link</th><th>Notes</th></tr>",
+            "<h2>{} · {}</h2><table><tr><th>Cue</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>",
             bank_letter(b),
-            esc(&p.banks[b].label(b))
+            esc(&p.banks[b].label(b)),
+            tr("Name"),
+            tr("Length"),
+            tr("Link"),
+            tr("Notes")
         );
         for c in cues {
             let cue = &p.cues[c];

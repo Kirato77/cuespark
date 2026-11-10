@@ -5,6 +5,7 @@ mod app;
 mod decode;
 mod engine;
 mod export;
+mod i18n;
 mod midi;
 mod project;
 mod update;
