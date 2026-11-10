@@ -112,6 +112,7 @@ const FRENCH_TEXT: &[(&str, &str)] = &[
     ("Preselect next Cue", "Présélectionner le cue suivant"),
     ("Preselect current Cue", "Garder le cue lancé"),
     ("Automatic Start", "Départ automatique"),
+    ("Loop the playing cue", "Boucler le cue en cours"),
     ("Start time:", "Heure de départ :"),
     ("use HH:MM", "format HH:MM"),
     ("To go:", "Départ dans :"),

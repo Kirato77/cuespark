@@ -1810,6 +1810,8 @@ impl App {
                 ui.radio_value(&mut pb.preselect_next, false, tr("Preselect current Cue"));
             });
         });
+        // Show Mode only shows LOOP CUE as a light, so it is switched here.
+        ui.checkbox(&mut pb.loop_cue, tr("Loop the playing cue")).on_hover_text(tr("Repeat the playing cue until stopped"));
         ui.separator();
         ui.checkbox(&mut pb.auto_start, tr("Automatic Start"));
         let mut arm_click = false;
