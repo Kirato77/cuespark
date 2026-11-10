@@ -45,7 +45,8 @@ pub struct Prefs {
     pub reopen_last: bool,
     pub keep_awake: bool,
     pub check_updates: bool,
-    /// Master volume 0..1.
+    /// Master volume 0..1. Not saved: a fader left down must not start the next show silent.
+    #[serde(skip, default = "full_volume")]
     pub master: f32,
     pub edit_dark: bool,
     /// UI in French instead of English.
@@ -53,6 +54,10 @@ pub struct Prefs {
     pub midi_port: Option<String>,
     /// Learned MIDI triggers for GO, Stop, Fade out.
     pub midi_triggers: [Option<crate::midi::Trigger>; 3],
+}
+
+fn full_volume() -> f32 {
+    1.0
 }
 
 impl Default for Prefs {
@@ -179,6 +184,8 @@ pub struct App {
     last_wanted: Vec<Option<String>>,
     /// Decaying level meter (left, right).
     meter: (f32, f32),
+    /// Last look for a missing card that may be back (outputs on a fallback device, MIDI).
+    last_device_check: Instant,
     /// Which waveform marker the mouse is dragging: true = out point.
     drag_out: bool,
     midi: Option<crate::midi::Midi>,
@@ -227,6 +234,7 @@ impl App {
             display: 0,
             last_wanted: Vec::new(),
             meter: (0.0, 0.0),
+            last_device_check: Instant::now(),
             drag_out: false,
             midi: None,
             midi_error: None,
@@ -275,14 +283,15 @@ impl App {
         self.slots[c].clip().is_some()
     }
 
-    /// Frames of all loaded cues in a bank (in/out points applied), at the bank's device rate.
-    fn bank_total(&self, bank: usize) -> u64 {
+    /// Milliseconds of all loaded cues in a bank (in/out points applied).
+    fn bank_total_ms(&self, bank: usize) -> u64 {
         let cues = bank * CUES_PER_BANK..(bank + 1) * CUES_PER_BANK;
-        cues.filter_map(|c| self.cue_frames(c)).sum()
+        cues.filter_map(|c| self.cue_frames(c).map(|f| f * 1000 / self.clip_rate(c))).sum()
     }
 
-    fn bank_rate(&self, bank: usize) -> u64 {
-        self.rate_for(bank * CUES_PER_BANK).max(1) as u64
+    /// Rate the cue's clip was decoded at: its frames stay valid while a device reconnects.
+    fn clip_rate(&self, c: CueId) -> u64 {
+        self.slots[c].rate.max(1) as u64
     }
 
     /// Device a bank plays on: its own choice, else the default output from Preferences.
@@ -343,7 +352,7 @@ impl App {
     /// Play range of a loaded cue in frames (in/out points applied).
     fn cue_range(&self, c: CueId) -> Option<(usize, usize)> {
         let frames = self.slots[c].clip()?.frames();
-        let rate = self.rate_for(c) as f64;
+        let rate = self.clip_rate(c) as f64;
         let cue = &self.project.cues[c];
         let start = ((cue.start.max(0.0) * rate) as usize).min(frames.saturating_sub(1));
         let end = if cue.end > 0.0 { ((cue.end * rate) as usize).clamp(start + 1, frames) } else { frames };
@@ -678,6 +687,10 @@ impl App {
             self.audio_error = Some(tr("Audio device lost. Reconnecting...").into());
             self.last_reconnect = Instant::now();
         }
+        if self.last_device_check.elapsed() > Duration::from_secs(2) {
+            self.last_device_check = Instant::now();
+            self.recover_devices(ctx);
+        }
         let wanted = self.wanted_keys();
         let missing = wanted.iter().any(|k| !self.outputs.iter().any(|o| &o.key == k));
         let unused = self.outputs.iter().any(|o| !wanted.contains(&o.key));
@@ -888,6 +901,32 @@ impl App {
         }
     }
 
+    /// A bank whose card vanished plays on the default device; switch back once the card
+    /// is present again and nothing plays on the fallback. Same idea for the MIDI input.
+    fn recover_devices(&mut self, ctx: &egui::Context) {
+        let on_fallback = |o: &Output| o.key.as_ref().is_some_and(|k| *k != o.engine.device_name);
+        if self.outputs.iter().any(on_fallback) {
+            let names = output_device_names();
+            let before = self.outputs.len();
+            self.outputs.retain(|o| {
+                !(on_fallback(o) && o.key.as_ref().is_some_and(|k| names.contains(k)) && o.engine.status.snapshot().cue.is_none())
+            });
+            if self.outputs.len() != before {
+                self.devices = names;
+                self.ensure_outputs();
+            }
+        }
+        if let Some(name) = self.prefs.midi_port.clone() {
+            let present = crate::midi::port_names().contains(&name);
+            if !present {
+                self.midi = None;
+                self.midi_error = Some(format!("{} {name}", tr("MIDI device not found:")));
+            } else if self.midi.is_none() {
+                self.connect_midi(ctx); // plugged back in
+            }
+        }
+    }
+
     fn connect_midi(&mut self, ctx: &egui::Context) {
         self.midi = None;
         self.midi_error = None;
@@ -903,6 +942,11 @@ impl App {
         let triggers: Vec<crate::midi::Trigger> = self.midi.as_ref().map(|m| m.rx.try_iter().collect()).unwrap_or_default();
         for t in triggers {
             if let Some(action) = self.midi_learn.take() {
+                for x in &mut self.prefs.midi_triggers {
+                    if *x == Some(t) {
+                        *x = None; // a pad drives one action only
+                    }
+                }
                 self.prefs.midi_triggers[action] = Some(t);
                 continue;
             }
@@ -922,6 +966,7 @@ impl App {
         to.push(std::mem::replace(&mut self.project, p));
         self.project.modified = today();
         self.dirty = true;
+        self.replaced = true; // not a new edit: keep it off the undo stack
         self.sync_slots();
         self.plan_dirty = true;
     }
@@ -931,14 +976,8 @@ impl App {
             self.dialog = Dialog::Message(tr("Collect audio").into(), tr("Save the show first: the audio goes into an Audio folder next to it.").into());
             return;
         };
-        let before = self.project.clone();
         let (copied, failures) = self.project.collect(&dir);
-        if self.project != before {
-            self.undo.push(before);
-            self.sync_slots();
-            self.save(false);
-        }
-        let mut msg = format!("{} {copied} → {}", tr("Files copied:"), dir.join("Audio").display());
+        let mut msg = format!("{} {copied} → {}\n{}", tr("Files copied:"), dir.join("Audio").display(), tr("Save the show to keep the new paths."));
         if !failures.is_empty() {
             msg += &format!("\n\n{}\n{}", tr("Failed:"), failures.join("\n"));
         }
@@ -947,14 +986,11 @@ impl App {
 
     fn relink_missing(&mut self) {
         let Some(folder) = rfd::FileDialog::new().set_title(tr("Folder to search for missing audio")).pick_folder() else { return };
-        let before = self.project.clone();
-        let (found, missing) = self.project.relink(&folder);
-        if found > 0 {
-            self.undo.push(before);
-            self.dirty = true;
-            self.sync_slots();
-        }
-        self.dialog = Dialog::Message(tr("Find missing files").into(), format!("{} {found}, {} {missing}", tr("Found:"), tr("still missing:")));
+        let msg = match self.project.relink(&folder) {
+            Ok((found, missing)) => format!("{} {found}, {} {missing}", tr("Found:"), tr("still missing:")),
+            Err(limit) => format!("{} ({limit}+)", tr("Folder too large: pick a folder closer to the audio.")),
+        };
+        self.dialog = Dialog::Message(tr("Find missing files").into(), msg);
     }
 
     fn export_cue_list(&mut self) {
@@ -967,7 +1003,7 @@ impl App {
             return;
         };
         let lengths: Vec<Option<String>> =
-            (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.rate_for(c).max(1) as u64))).collect();
+            (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.clip_rate(c)))).collect();
         let csv = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
         let text = if csv { crate::export::csv(&self.project, &lengths) } else { crate::export::html(&self.project, &lengths) };
         if let Err(e) = std::fs::write(&path, text) {
@@ -1060,7 +1096,7 @@ impl App {
 
         // Bank total.
         let bx = ela.x + 50.0;
-        let tot = self.bank_total(self.view_bank);
+        let tot = self.bank_total_ms(self.view_bank);
         let p = ui.painter();
         p.rect_filled(Rect::from_min_size(pos2(bx, y0), vec2(64.0, 14.0)), 0.0, Color32::from_gray(0x40));
         p.text(pos2(bx + 4.0, y0 + 1.0), Align2::LEFT_TOP, format!("BANK  {}", bank_letter(self.view_bank)), FontId::proportional(11.0), WHITE);
@@ -1069,7 +1105,7 @@ impl App {
         for (txt, dx) in [("min", 0.0), ("sec", 26.0), ("msec", 52.0)] {
             p.text(pos2(bx + dx, y0 + 17.0), Align2::LEFT_TOP, txt, FontId::proportional(9.0), GREY);
         }
-        p.text(pos2(bx, y0 + 26.0), Align2::LEFT_TOP, fmt_time(tot, self.bank_rate(self.view_bank)), FontId::monospace(20.0), WHITE);
+        p.text(pos2(bx, y0 + 26.0), Align2::LEFT_TOP, fmt_time(tot, 1000), FontId::monospace(20.0), WHITE);
 
         // Now playing.
         if let Some(c) = snap.cue {
@@ -1203,7 +1239,7 @@ impl App {
                 SlotState::Failed(_) => (tr("MISSING").into(), Color32::from_rgb(0xff, 0x80, 0x40)),
                 SlotState::Ready(_) => {
                     let t = if playing { snap.len.saturating_sub(snap.pos) } else { self.cue_frames(id).unwrap_or(0) };
-                    (fmt_time(t, self.rate_for(id).max(1) as u64), WHITE)
+                    (fmt_time(t, self.clip_rate(id)), WHITE)
                 }
             };
             p.text(pos2(r.max.x - 14.0, info_y), Align2::RIGHT_CENTER, right_text, FontId::monospace(name_size * 0.85), right_color);
@@ -1448,7 +1484,7 @@ impl App {
     /// Bottom of Edit Mode: everything about the selected cue.
     fn cue_inspector(&mut self, ui: &mut Ui) {
         let c = self.selected;
-        let dur = self.slots[c].clip().map(|k| k.frames() as f64 / self.rate_for(c).max(1) as f64).unwrap_or(0.0);
+        let dur = self.slots[c].clip().map(|k| k.frames() as f64 / self.clip_rate(c) as f64).unwrap_or(0.0);
         ui.vertical(|ui| {
             ui.set_width(ui.available_width() * 0.62);
             let cue = &mut self.project.cues[c];
@@ -1466,11 +1502,13 @@ impl App {
             });
             ui.horizontal(|ui| {
                 ui.label(tr("In"));
-                ui.add(egui::DragValue::new(&mut cue.start).range(0.0..=dur).speed(0.01).suffix(" s").fixed_decimals(3));
+                // No clamping of the stored value: with the audio missing, dur is 0 and would erase the trim.
+                ui.add(egui::DragValue::new(&mut cue.start).range(0.0..=dur).clamp_existing_to_range(false).speed(0.01).suffix(" s").fixed_decimals(3));
                 ui.label(tr("Out"));
                 ui.add(
                     egui::DragValue::new(&mut cue.end)
                         .range(0.0..=dur)
+                        .clamp_existing_to_range(false)
                         .speed(0.01)
                         .custom_formatter(|v, _| if v <= 0.0 { "end".into() } else { format!("{v:.3} s") }),
                 );
@@ -1693,7 +1731,7 @@ impl App {
             ui.end_row();
             for b in 0..BANKS {
                 let channels = self.out_index(b * CUES_PER_BANK).map(|i| self.outputs[i].engine.channels).unwrap_or(2);
-                let (tot, rate) = (self.bank_total(b), self.bank_rate(b));
+                let (tot, rate) = (self.bank_total_ms(b), 1000);
                 ui.label(bank_letter(b).to_string());
                 let bank = &mut self.project.banks[b];
                 ui.checkbox(&mut bank.link_cues, "");
@@ -1766,7 +1804,7 @@ impl App {
     fn cue_table(&mut self, ui: &mut Ui, snap: &Snapshot) {
         use egui_extras::{Column, TableBuilder};
         let lengths: Vec<Option<String>> =
-            (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.rate_for(c).max(1) as u64))).collect();
+            (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.clip_rate(c)))).collect();
         let mut browse = None;
         let mut reset = None;
         let mut preview = None;
@@ -1899,7 +1937,9 @@ impl App {
                 } else {
                     let loading = self.slots.iter().filter(|s| matches!(s.state, SlotState::Loading)).count();
                     let failed = self.slots.iter().filter(|s| matches!(s.state, SlotState::Failed(_))).count();
-                    if loading > 0 {
+                    if let Some(e) = &self.midi_error {
+                        ui.label(egui::RichText::new(e).color(ORANGE));
+                    } else if loading > 0 {
                         ui.label(egui::RichText::new(format!("{}: {loading}…", tr("Loading clips"))).color(Color32::from_rgb(0xe0, 0xa0, 0x20)));
                     } else if failed > 0 {
                         ui.label(egui::RichText::new(format!("{}: {failed}", tr("Missing or unreadable clips"))).color(Color32::from_rgb(0xff, 0x70, 0x30)));
@@ -2129,10 +2169,11 @@ impl eframe::App for App {
         crate::i18n::set_french(self.prefs.french);
         self.apply_theme(&ctx);
         self.handle_close(&ctx);
+        // Taken before the shortcuts, so Del and Alt+Up/Down count as edits too.
+        let before = self.project.clone();
         if matches!(self.dialog, Dialog::None) {
             self.global_shortcuts(&ctx);
         }
-        let before = self.project.clone();
 
         match self.mode {
             Mode::Show => self.show_mode(ui),

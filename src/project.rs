@@ -227,10 +227,12 @@ impl Project {
     }
 
     /// Point cues whose file is gone to a file with the same name somewhere under `folder`.
-    /// Returns (found, still missing).
-    pub fn relink(&mut self, folder: &Path) -> (usize, usize) {
+    /// Returns (found, still missing), or the file limit when the folder is too big to scan.
+    pub fn relink(&mut self, folder: &Path) -> Result<(usize, usize), usize> {
         let mut index = std::collections::HashMap::new();
-        index_files(folder, 0, &mut index);
+        if !index_files(folder, 0, &mut index, &mut 0) {
+            return Err(MAX_INDEXED);
+        }
         let (mut found, mut missing) = (0, 0);
         for cue in self.cues.iter_mut().filter(|c| !c.path.is_empty() && !Path::new(&c.path).exists()) {
             let name = Path::new(&cue.path.replace('\\', "/")).file_name().map(|n| n.to_string_lossy().to_lowercase());
@@ -242,9 +244,12 @@ impl Project {
                 None => missing += 1,
             }
         }
-        (found, missing)
+        Ok((found, missing))
     }
 }
+
+/// Beyond this, scanning would freeze the UI for too long (someone picked a whole drive).
+const MAX_INDEXED: usize = 50_000;
 
 /// `dir/name.ext`, or `dir/name (2).ext` if that name is taken by another file.
 fn free_name(dir: &Path, src: &Path) -> PathBuf {
@@ -259,18 +264,24 @@ fn free_name(dir: &Path, src: &Path) -> PathBuf {
 }
 
 /// File name (lowercase) -> path, a few folders deep; first match wins.
-fn index_files(dir: &Path, depth: usize, index: &mut std::collections::HashMap<String, PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+/// Returns false once `MAX_INDEXED` files are seen.
+fn index_files(dir: &Path, depth: usize, index: &mut std::collections::HashMap<String, PathBuf>, seen: &mut usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return true };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            if depth < 6 {
-                index_files(&p, depth + 1, index);
+            if depth < 6 && !index_files(&p, depth + 1, index, seen) {
+                return false;
             }
         } else if let Some(n) = p.file_name() {
             index.entry(n.to_string_lossy().to_lowercase()).or_insert(p);
+            *seen += 1;
+            if *seen >= MAX_INDEXED {
+                return false;
+            }
         }
     }
+    true
 }
 
 /// Resolve a stored path. Shows move between machines (D:\ vs C:\, Windows vs Linux),
@@ -409,7 +420,7 @@ mod tests {
         let mut q = Project::default();
         q.cues[0].path = "D:\\old\\HIT.wav".into();
         q.cues[1].path = "/gone/nothing.wav".into();
-        assert_eq!(q.relink(&elsewhere), (1, 1));
+        assert_eq!(q.relink(&elsewhere), Ok((1, 1)));
         assert!(q.cues[0].path.ends_with("hit.wav"));
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -166,6 +166,9 @@ const FRENCH_TEXT: &[(&str, &str)] = &[
     ("Check for updates", "Chercher une mise à jour"),
     ("About", "À propos"),
     ("Language", "Langue"),
+    ("MIDI device not found:", "Appareil MIDI introuvable :"),
+    ("Save the show to keep the new paths.", "Enregistrez le show pour garder les nouveaux chemins."),
+    ("Folder too large: pick a folder closer to the audio.", "Dossier trop gros : choisissez un dossier plus proche des sons."),
     // Updates
     ("Checking for updates…", "Recherche de mise à jour…"),
     ("up to date", "à jour"),
