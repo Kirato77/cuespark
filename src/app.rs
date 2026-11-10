@@ -146,6 +146,23 @@ impl Loader {
     }
 }
 
+/// What to do with the path a file dialog returns.
+enum Ask {
+    Open,
+    /// Save there, then carry on with the action that asked for the save.
+    SaveAs(Option<Pending>),
+    Browse(CueId),
+    Relink,
+    Export,
+}
+
+#[derive(Clone, Copy)]
+enum Pick {
+    File,
+    Save,
+    Folder,
+}
+
 #[derive(Clone)]
 enum Pending {
     New,
@@ -233,6 +250,10 @@ pub struct App {
     /// Owned by the main window on Windows: a parentless dialog can hide behind the
     /// (blocked) app window, which then looks frozen. Linux keeps the portal's own placement.
     dialogs: rfd::FileDialog,
+    ctx: egui::Context,
+    /// Linux file dialog running on its own thread, and what to do with its answer.
+    #[cfg(not(windows))]
+    asking: Option<(Ask, mpsc::Receiver<Option<PathBuf>>)>,
 }
 
 impl App {
@@ -288,6 +309,9 @@ impl App {
             dialogs: rfd::FileDialog::new().set_parent(cc),
             #[cfg(not(windows))]
             dialogs: rfd::FileDialog::new(),
+            ctx: cc.egui_ctx.clone(),
+            #[cfg(not(windows))]
+            asking: None,
         };
         app.ensure_outputs();
         app.connect_midi(&cc.egui_ctx);
@@ -574,9 +598,8 @@ impl App {
                 self.reset_show_state();
             }
             Pending::Open => {
-                if let Some(path) = self.file_dialog().add_filter(tr("Cue Spark show"), &[EXTENSION]).pick_file() {
-                    self.open_path(&path);
-                }
+                let dialog = self.file_dialog().add_filter(tr("Cue Spark show"), &[EXTENSION]);
+                self.ask(Ask::Open, dialog, Pick::File);
             }
             Pending::OpenPath(path) => self.open_path(&path),
             Pending::Quit => {
@@ -617,24 +640,29 @@ impl App {
         self.prefs.recent.truncate(8);
     }
 
-    fn save(&mut self, choose: bool) -> bool {
-        let path = match (&self.file, choose) {
-            (Some(f), false) => f.clone(),
+    /// Saves at once when the show has a file (true); otherwise asks where, then saves and
+    /// runs `then` once the user has picked a place (false here).
+    fn save(&mut self, choose: bool, then: Option<Pending>) -> bool {
+        match (&self.file, choose) {
+            (Some(f), false) => {
+                let f = f.clone();
+                self.write_show(&f)
+            }
             _ => {
                 let name = format!("{}.{EXTENSION}", self.project.name);
-                match self.file_dialog().add_filter(tr("Cue Spark show"), &[EXTENSION]).set_file_name(name).save_file()
-                {
-                    Some(p) if p.extension().is_none() => p.with_extension(EXTENSION),
-                    Some(p) => p,
-                    None => return false,
-                }
+                let dialog = self.file_dialog().add_filter(tr("Cue Spark show"), &[EXTENSION]).set_file_name(name);
+                self.ask(Ask::SaveAs(then), dialog, Pick::Save);
+                false
             }
-        };
-        match self.project.save(&path) {
+        }
+    }
+
+    fn write_show(&mut self, path: &Path) -> bool {
+        match self.project.save(path) {
             Ok(()) => {
-                self.file = Some(path.clone());
+                self.file = Some(path.to_path_buf());
                 self.dirty = false;
-                self.remember(&path);
+                self.remember(path);
                 true
             }
             Err(e) => {
@@ -665,8 +693,92 @@ impl App {
         if let Some(dir) = Path::new(&self.project.cues[cue].path).parent().filter(|d| d.is_dir()) {
             dialog = dialog.set_directory(dir);
         }
-        if let Some(path) = dialog.pick_file() {
-            self.assign_file(cue, &path);
+        self.ask(Ask::Browse(cue), dialog, Pick::File);
+    }
+
+    /// Show a file dialog; `answer` gets the result.
+    fn ask(&mut self, what: Ask, dialog: rfd::FileDialog, pick: Pick) {
+        let run = move || match pick {
+            Pick::File => dialog.pick_file(),
+            Pick::Save => dialog.save_file(),
+            Pick::Folder => dialog.pick_folder(),
+        };
+        // Windows' dialog keeps the window's messages flowing and stays modal to it.
+        #[cfg(windows)]
+        self.answer(what, run());
+        // The Linux portal call blocks: on the UI thread the window stops answering the
+        // compositor, which then offers to kill the "frozen" app. Run it aside.
+        #[cfg(not(windows))]
+        if self.asking.is_none() {
+            let (tx, rx) = mpsc::channel();
+            let ctx = self.ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(run());
+                ctx.request_repaint();
+            });
+            self.asking = Some((what, rx));
+        }
+    }
+
+    /// Pick up a Linux dialog's answer. Called inside the UI pass, so edits it makes are
+    /// tracked (unsaved mark, undo) like any other.
+    fn poll_file_dialog(&mut self) {
+        #[cfg(not(windows))]
+        {
+            let result = match &self.asking {
+                Some((_, rx)) => rx.try_recv(),
+                None => return,
+            };
+            match result {
+                Ok(path) => {
+                    if let Some((what, _)) = self.asking.take() {
+                        self.answer(what, path);
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.asking = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    fn answer(&mut self, what: Ask, path: Option<PathBuf>) {
+        let Some(path) = path else { return }; // cancelled
+        match what {
+            Ask::Open => self.open_path(&path),
+            Ask::SaveAs(then) => {
+                let path = if path.extension().is_none() { path.with_extension(EXTENSION) } else { path };
+                if self.write_show(&path)
+                    && let Some(p) = then
+                {
+                    self.finish_pending(p);
+                }
+            }
+            Ask::Browse(cue) => self.assign_file(cue, &path),
+            Ask::Relink => {
+                let msg = match self.project.relink(&path) {
+                    Ok((found, missing)) => format!("{} {found}, {} {missing}", tr("Found:"), tr("still missing:")),
+                    Err(limit) => format!("{} ({limit}+)", tr("Folder too large: pick a folder closer to the audio.")),
+                };
+                self.dialog = Dialog::Message(tr("Find missing files").into(), msg);
+            }
+            Ask::Export => {
+                let lengths: Vec<Option<String>> =
+                    (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.clip_rate(c)))).collect();
+                let csv = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
+                let text = if csv { crate::export::csv(&self.project, &lengths) } else { crate::export::html(&self.project, &lengths) };
+                if let Err(e) = std::fs::write(&path, text) {
+                    self.dialog = Dialog::Message(tr("Export failed").into(), format!("{}: {e}", path.display()));
+                }
+            }
+        }
+    }
+
+    /// Carry on with New / Open / Quit once the show is saved or discarded.
+    fn finish_pending(&mut self, p: Pending) {
+        self.dirty = false;
+        self.run_pending(p);
+        if self.allow_close {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -891,9 +1003,9 @@ impl App {
                 self.request(Pending::Open);
             }
             if save_as {
-                self.save(true);
+                self.save(true, None);
             } else if save {
-                self.save(false);
+                self.save(false, None);
             }
             if !ctx.egui_wants_keyboard_input() {
                 let (undo, redo) = ctx.input_mut(|i| {
@@ -1024,31 +1136,17 @@ impl App {
     }
 
     fn relink_missing(&mut self) {
-        let Some(folder) = self.file_dialog().set_title(tr("Folder to search for missing audio")).pick_folder() else { return };
-        let msg = match self.project.relink(&folder) {
-            Ok((found, missing)) => format!("{} {found}, {} {missing}", tr("Found:"), tr("still missing:")),
-            Err(limit) => format!("{} ({limit}+)", tr("Folder too large: pick a folder closer to the audio.")),
-        };
-        self.dialog = Dialog::Message(tr("Find missing files").into(), msg);
+        let dialog = self.file_dialog().set_title(tr("Folder to search for missing audio"));
+        self.ask(Ask::Relink, dialog, Pick::Folder);
     }
 
     fn export_cue_list(&mut self) {
-        let Some(path) = self
+        let dialog = self
             .file_dialog()
             .add_filter(tr("Printable page (HTML)"), &["html"])
             .add_filter(tr("Spreadsheet (CSV)"), &["csv"])
-            .set_file_name(format!("{} - {}.html", self.project.name, tr("cue list")))
-            .save_file()
-        else {
-            return;
-        };
-        let lengths: Vec<Option<String>> =
-            (0..CUE_COUNT).map(|c| self.cue_frames(c).map(|f| fmt_time(f, self.clip_rate(c)))).collect();
-        let csv = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
-        let text = if csv { crate::export::csv(&self.project, &lengths) } else { crate::export::html(&self.project, &lengths) };
-        if let Err(e) = std::fs::write(&path, text) {
-            self.dialog = Dialog::Message(tr("Export failed").into(), format!("{}: {e}", path.display()));
-        }
+            .set_file_name(format!("{} - {}.html", self.project.name, tr("cue list")));
+        self.ask(Ask::Export, dialog, Pick::Save);
     }
 
     fn toggle_mode(&mut self) {
@@ -1432,7 +1530,7 @@ impl App {
                     self.request(Pending::Open);
                 }
                 if ui.button(tr("Save")).on_hover_text(tr("Save (Ctrl+S)")).clicked() {
-                    self.save(false);
+                    self.save(false, None);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.update_widget(ui));
             });
@@ -1699,10 +1797,10 @@ impl App {
                     }
                 });
                 if ui.button(tr("Save           Ctrl+S")).clicked() {
-                    self.save(false);
+                    self.save(false, None);
                 }
                 if ui.button(tr("Save as…  Ctrl+Shift+S")).clicked() {
-                    self.save(true);
+                    self.save(true, None);
                 }
                 if ui.button(tr("Export cue list…")).on_hover_text(tr("Printable page (save as PDF from the browser) or CSV")).clicked() {
                     self.export_cue_list();
@@ -2144,13 +2242,10 @@ impl App {
             self.dialog = Dialog::Licenses;
         }
         if let Some((p, save_first)) = then
-            && (!save_first || self.save(false)) {
-                self.dirty = false;
-                self.run_pending(p);
-                if self.allow_close {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
+            && (!save_first || self.save(false, Some(p.clone())))
+        {
+            self.finish_pending(p);
+        }
     }
 
     fn handle_close(&mut self, ctx: &egui::Context) {
@@ -2241,6 +2336,7 @@ impl eframe::App for App {
             Mode::Edit => self.edit_mode(ui),
         }
         self.dialogs(&ctx);
+        self.poll_file_dialog();
 
         if !std::mem::take(&mut self.replaced) && self.project != before {
             self.history.record(before, Instant::now());
