@@ -484,7 +484,7 @@ impl Engine {
         // Small buffer = fast GO. Fall back to the driver default if the device refuses it.
         let mut last_err = String::new();
         for buffer in [cpal::BufferSize::Fixed(512), cpal::BufferSize::Default] {
-            let config = cpal::StreamConfig { buffer_size: buffer, ..base.clone() };
+            let config = cpal::StreamConfig { buffer_size: buffer, ..base };
             let (tx, rx) = rtrb::RingBuffer::new(256);
             let (gtx, grx) = rtrb::RingBuffer::new(1024);
             let status = Arc::new(Status::new());
@@ -527,7 +527,7 @@ fn build<T: SizedSample + FromSample<f32>>(
 ) -> Result<cpal::Stream, String> {
     let channels = config.channels as usize;
     dev.build_output_stream(
-        config.clone(),
+        *config,
         move |out: &mut [T], _| mixer.render(out, channels),
         move |err| {
             // Xruns are survivable; a vanished or changed device is not.

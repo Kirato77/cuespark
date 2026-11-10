@@ -1268,22 +1268,25 @@ impl App {
             let stroke = Stroke::new(3.0, if linked { RED } else { DIM });
             let x0 = r.max.x + 4.0;
             let yt = r.max.y - bh * 0.3;
+            let x1 = x0 + 10.0;
             let path = match slot {
                 9 => vec![], // last cue of the bank: nothing follows on screen
-                4 => {
-                    // F5 -> F6: step up into the second column.
-                    let xm = r.max.x + (bracket + col_gap) / 2.0;
-                    let y6 = area.min.y + bh * 0.3;
-                    let x6 = r.max.x + bracket + col_gap - 4.0;
-                    vec![pos2(x0, yt), pos2(xm, yt), pos2(xm, y6), pos2(x6, y6)]
-                }
+                // F5 -> F6 is cut in two, as in CueFire: F5 leaves towards the bottom...
+                4 => vec![pos2(x0, yt), pos2(x1, yt), pos2(x1, area.max.y + 4.0)],
                 _ => {
-                    let (x1, yb) = (x0 + 10.0, r.max.y + gap + bh * 0.3);
+                    let yb = r.max.y + gap + bh * 0.3;
                     vec![pos2(x0, yt), pos2(x1, yt), pos2(x1, yb), pos2(x0, yb)]
                 }
             };
             if !path.is_empty() {
                 p.add(egui::Shape::line(path, stroke));
+            }
+            if slot == 5 {
+                // ...and F6 receives it from the top, coloured by F5's link.
+                let f5 = self.view_bank * CUES_PER_BANK + 4;
+                let into = Stroke::new(3.0, if bank.link_cues && self.project.cues[f5].link { RED } else { DIM });
+                let y6 = r.min.y + bh * 0.3;
+                p.add(egui::Shape::line(vec![pos2(x1, area.min.y - 4.0), pos2(x1, y6), pos2(x0, y6)], into));
             }
 
             let tip = match slot_state {
@@ -2122,15 +2125,14 @@ impl App {
         if licenses {
             self.dialog = Dialog::Licenses;
         }
-        if let Some((p, save_first)) = then {
-            if !save_first || self.save(false) {
+        if let Some((p, save_first)) = then
+            && (!save_first || self.save(false)) {
                 self.dirty = false;
                 self.run_pending(p);
                 if self.allow_close {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
-        }
     }
 
     fn handle_close(&mut self, ctx: &egui::Context) {
@@ -2230,7 +2232,7 @@ impl eframe::App for App {
             self.plan_dirty = true;
         }
         let title = format!(
-            "Cue Spark {VERSION}  |  {}{}",
+            "Cue Spark  |  {}{}",
             self.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| self.project.name.clone()),
             if self.dirty { " *" } else { "" }
         );

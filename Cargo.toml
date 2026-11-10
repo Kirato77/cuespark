@@ -1,6 +1,6 @@
 [package]
 name = "cuespark"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Instant playback of show sound cues (theatre, live events)"
 license = "GPL-3.0-or-later"

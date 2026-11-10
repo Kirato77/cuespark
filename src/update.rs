@@ -191,7 +191,7 @@ mod tests {
         let u = pick(serde_json::from_str(&json).unwrap(), "0.1.0").unwrap().unwrap();
         assert_eq!((u.version.as_str(), u.url.as_str(), u.size), ("9.0.0", "https://x/a", 42));
         assert_eq!(u.sha256.as_deref(), Some("abcd"));
-        let same = format!(r#"{{"tag_name":"v0.1.0","assets":[]}}"#);
+        let same = r#"{"tag_name":"v0.1.0","assets":[]}"#.to_string();
         assert!(pick(serde_json::from_str(&same).unwrap(), "0.1.0").unwrap().is_none());
     }
 
