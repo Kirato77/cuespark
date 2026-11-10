@@ -332,6 +332,16 @@ fn index_files(dir: &Path, depth: usize, index: &mut std::collections::HashMap<S
     true
 }
 
+/// Windows `canonicalize` gives `\\?\C:\show`, file dialogs and drops give `C:\show`:
+/// keep the plain form so audio paths below the show still save as relative.
+pub fn plain_path(p: &Path) -> PathBuf {
+    match p.to_str() {
+        Some(s) if s.starts_with(r"\\?\UNC\") => PathBuf::from(format!(r"\\{}", &s[8..])),
+        Some(s) if s.starts_with(r"\\?\") && s[4..].contains(':') => PathBuf::from(&s[4..]),
+        _ => p.to_path_buf(),
+    }
+}
+
 /// Resolve a stored path. Shows move between machines (D:\ vs C:\, Windows vs Linux),
 /// so when the stored path is gone, look for the file name next to the show file
 /// and one folder below it.
@@ -423,7 +433,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("clips")).unwrap();
         std::fs::write(dir.join("clips/a.wav"), b"x").unwrap();
         let mut p = Project::default();
-        p.cues[3].path = dir.join("clips/a.wav").to_string_lossy().into_owned();
+        let clip = dir.join("clips").join("a.wav");
+        p.cues[3].path = clip.to_string_lossy().into_owned();
         p.cues[3].notes = "Jets!".into();
         let file = dir.join("show.cuespark");
         p.save(&file).unwrap();
@@ -431,8 +442,15 @@ mod tests {
         assert!(raw.contains("\"clips/a.wav\""), "stored relative: {raw}");
         assert_eq!(Project::load(&file).unwrap(), p);
         // Moved machine: absolute path gone, file found next to the show.
-        assert_eq!(resolve(&dir, "D:\\old\\clips\\a.wav"), dir.join("clips/a.wav"));
+        assert_eq!(resolve(&dir, "D:\\old\\clips\\a.wav"), clip);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn plain_path_drops_windows_verbatim_prefix() {
+        assert_eq!(plain_path(Path::new(r"\\?\C:\show\a.cuespark")), Path::new(r"C:\show\a.cuespark"));
+        assert_eq!(plain_path(Path::new(r"\\?\UNC\nas\shows\a.cuespark")), Path::new(r"\\nas\shows\a.cuespark"));
+        assert_eq!(plain_path(Path::new("/home/me/a.cuespark")), Path::new("/home/me/a.cuespark"));
     }
 
     #[test]

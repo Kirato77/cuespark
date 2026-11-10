@@ -455,11 +455,15 @@ pub struct Engine {
 }
 
 /// (id, name) of every output device.
+/// Sorted by name: WASAPI lists endpoints in no useful order (CH3&4 before CH1&2).
 pub fn output_devices() -> Vec<(String, String)> {
     let host = cpal::default_host();
-    host.output_devices()
+    let mut devices: Vec<(String, String)> = host
+        .output_devices()
         .map(|it| it.filter_map(|d| Some((d.id().ok()?.to_string(), d.description().ok()?.name().to_string()))).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    devices.sort_by_key(|(_, name)| name.to_lowercase());
+    devices
 }
 
 impl Engine {

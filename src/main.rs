@@ -38,6 +38,25 @@ pub fn set_keep_awake(on: bool) {
     unsafe { SetThreadExecutionState(flags) };
 }
 
+/// The OS cursor, in egui points. Windows sends no mouse moves during an OLE drag-and-drop,
+/// so egui's own pointer still sits where the drag entered the window.
+#[cfg(windows)]
+pub fn cursor_pos(ctx: &eframe::egui::Context) -> Option<eframe::egui::Pos2> {
+    use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+    let mut p = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut p) } == 0 {
+        return None;
+    }
+    let inner = ctx.input(|i| i.viewport().inner_rect)?;
+    let ppp = ctx.pixels_per_point();
+    Some(eframe::egui::pos2(p.x as f32 / ppp, p.y as f32 / ppp) - inner.min.to_vec2())
+}
+
+#[cfg(not(windows))]
+pub fn cursor_pos(ctx: &eframe::egui::Context) -> Option<eframe::egui::Pos2> {
+    ctx.input(|i| i.pointer.hover_pos())
+}
+
 // No screen-saver inhibit on Linux yet (the idle-inhibit portal would do it).
 #[cfg(not(windows))]
 pub fn set_keep_awake(_on: bool) {}

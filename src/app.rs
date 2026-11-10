@@ -5,7 +5,7 @@ use crate::engine::{Cmd, Engine, NONE, Plan, PlanCue, Snapshot, output_devices};
 use crate::i18n::tr;
 use crate::update::{self, VERSION};
 use crate::project::{
-    BANKS, CUE_COUNT, CUES_PER_BANK, Cue, CueId, EXTENSION, History, Project, bank_letter, cue_key, next_start, parse_hhmm, today,
+    BANKS, CUE_COUNT, CUES_PER_BANK, Cue, CueId, EXTENSION, History, Project, bank_letter, cue_key, next_start, parse_hhmm, plain_path, today,
 };
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Event, FontId, Key, Layout, Modifiers, Pos2, Rect, Sense, Stroke,
@@ -230,11 +230,22 @@ pub struct App {
     update: update::Shared,
     /// Show tr("up to date") / errors only when the user asked; a silent startup check stays silent.
     update_manual: bool,
+    /// Owned by the main window on Windows: a parentless dialog can hide behind the
+    /// (blocked) app window, which then looks frozen. Linux keeps the portal's own placement.
+    dialogs: rfd::FileDialog,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open_arg: Option<PathBuf>) -> Self {
-        let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        // Up to 0.3.2, a show opened from the command line was stored as `\\?\C:\...`: same file, listed twice.
+        let mut recent: Vec<PathBuf> = Vec::new();
+        for p in prefs.recent.drain(..).map(|p| plain_path(&p)) {
+            if !recent.contains(&p) {
+                recent.push(p);
+            }
+        }
+        prefs.recent = recent;
         let mut app = Self {
             project: Project::default(),
             file: None,
@@ -273,6 +284,10 @@ impl App {
             replaced: false,
             update: Arc::new(Mutex::new(update::State::Idle)),
             update_manual: false,
+            #[cfg(windows)]
+            dialogs: rfd::FileDialog::new().set_parent(cc),
+            #[cfg(not(windows))]
+            dialogs: rfd::FileDialog::new(),
         };
         app.ensure_outputs();
         app.connect_midi(&cc.egui_ctx);
@@ -559,7 +574,7 @@ impl App {
                 self.reset_show_state();
             }
             Pending::Open => {
-                if let Some(path) = rfd::FileDialog::new().add_filter(tr("Cue Spark show"), &[EXTENSION]).pick_file() {
+                if let Some(path) = self.file_dialog().add_filter(tr("Cue Spark show"), &[EXTENSION]).pick_file() {
                     self.open_path(&path);
                 }
             }
@@ -581,6 +596,7 @@ impl App {
     }
 
     fn open_path(&mut self, path: &Path) {
+        let path = &plain_path(path);
         match Project::load(path) {
             Ok(p) => {
                 self.send_all(|_| Cmd::Stop { fade_frames: 0 });
@@ -606,7 +622,7 @@ impl App {
             (Some(f), false) => f.clone(),
             _ => {
                 let name = format!("{}.{EXTENSION}", self.project.name);
-                match rfd::FileDialog::new().add_filter(tr("Cue Spark show"), &[EXTENSION]).set_file_name(name).save_file()
+                match self.file_dialog().add_filter(tr("Cue Spark show"), &[EXTENSION]).set_file_name(name).save_file()
                 {
                     Some(p) if p.extension().is_none() => p.with_extension(EXTENSION),
                     Some(p) => p,
@@ -636,11 +652,17 @@ impl App {
         }
     }
 
+    /// Native file dialog on top of the main window, starting in the show's folder.
+    fn file_dialog(&self) -> rfd::FileDialog {
+        match self.file.as_ref().and_then(|f| f.parent()) {
+            Some(dir) => self.dialogs.clone().set_directory(dir),
+            None => self.dialogs.clone(),
+        }
+    }
+
     fn browse(&mut self, cue: CueId) {
-        let mut dialog = rfd::FileDialog::new().add_filter(tr("Audio"), AUDIO_EXTENSIONS);
+        let mut dialog = self.file_dialog().add_filter(tr("Audio"), AUDIO_EXTENSIONS);
         if let Some(dir) = Path::new(&self.project.cues[cue].path).parent().filter(|d| d.is_dir()) {
-            dialog = dialog.set_directory(dir);
-        } else if let Some(dir) = self.file.as_ref().and_then(|f| f.parent()) {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
@@ -994,7 +1016,7 @@ impl App {
             return;
         };
         let (copied, failures) = self.project.collect(&dir);
-        let mut msg = format!("{} {copied} → {}\n{}", tr("Files copied:"), dir.join("Audio").display(), tr("Save the show to keep the new paths."));
+        let mut msg = format!("{} {copied}\n{}\n{}", tr("Files copied:"), dir.join("Audio").display(), tr("Save the show to keep the new paths."));
         if !failures.is_empty() {
             msg += &format!("\n\n{}\n{}", tr("Failed:"), failures.join("\n"));
         }
@@ -1002,7 +1024,7 @@ impl App {
     }
 
     fn relink_missing(&mut self) {
-        let Some(folder) = rfd::FileDialog::new().set_title(tr("Folder to search for missing audio")).pick_folder() else { return };
+        let Some(folder) = self.file_dialog().set_title(tr("Folder to search for missing audio")).pick_folder() else { return };
         let msg = match self.project.relink(&folder) {
             Ok((found, missing)) => format!("{} {found}, {} {missing}", tr("Found:"), tr("still missing:")),
             Err(limit) => format!("{} ({limit}+)", tr("Folder too large: pick a folder closer to the audio.")),
@@ -1011,7 +1033,8 @@ impl App {
     }
 
     fn export_cue_list(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
+        let Some(path) = self
+            .file_dialog()
             .add_filter(tr("Printable page (HTML)"), &["html"])
             .add_filter(tr("Spreadsheet (CSV)"), &["csv"])
             .set_file_name(format!("{} - {}.html", self.project.name, tr("cue list")))
@@ -1848,7 +1871,7 @@ impl App {
         let mut browse = None;
         let mut reset = None;
         let mut preview = None;
-        let mut hovered_row = None;
+        let mut row_rects = Vec::new();
         TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
@@ -1927,9 +1950,7 @@ impl App {
                         }
                     });
                     let resp = row.response();
-                    if resp.hovered() {
-                        hovered_row = Some(c);
-                    }
+                    row_rects.push((c, resp.rect));
                     if resp.clicked() {
                         self.selected = c;
                     }
@@ -1951,7 +1972,8 @@ impl App {
         // Dropped files fill consecutive cues from the row under the mouse (or the selected one).
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if !dropped.is_empty() {
-            let start = hovered_row.unwrap_or(self.selected);
+            let under = crate::cursor_pos(ui.ctx()).and_then(|p| row_rects.iter().find(|(_, r)| r.contains(p)));
+            let start = under.map_or(self.selected, |&(c, _)| c);
             for (i, path) in dropped.iter().filter(|p| is_audio(p)).take(CUE_COUNT - start).enumerate() {
                 self.assign_file(start + i, path);
             }
