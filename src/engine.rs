@@ -450,26 +450,31 @@ pub struct Engine {
     pub rate: u32,
     pub channels: usize,
     pub device_name: String,
+    /// Stable, unique id: two identical cards share a name, never an id.
+    pub device_id: String,
 }
 
-pub fn output_device_names() -> Vec<String> {
+/// (id, name) of every output device.
+pub fn output_devices() -> Vec<(String, String)> {
     let host = cpal::default_host();
     host.output_devices()
-        .map(|it| it.filter_map(|d| d.description().ok().map(|d| d.name().to_string())).collect())
+        .map(|it| it.filter_map(|d| Some((d.id().ok()?.to_string(), d.description().ok()?.name().to_string()))).collect())
         .unwrap_or_default()
 }
 
 impl Engine {
-    /// `device`: a name from `output_device_names()`, or None / unknown for the system default.
+    /// `device`: an id from `output_devices()` (or a name, as older shows stored), or
+    /// None / not found for the system default.
     pub fn open(device: Option<&str>) -> Result<Engine, String> {
         let host = cpal::default_host();
-        let wanted = device.and_then(|name| {
-            host.output_devices()
-                .ok()?
-                .find(|d| d.description().map(|x| x.name() == name).unwrap_or(false))
+        let wanted = device.and_then(|key| {
+            key.parse::<cpal::DeviceId>().ok().and_then(|id| host.device_by_id(&id)).or_else(|| {
+                host.output_devices().ok()?.find(|d| d.description().map(|x| x.name() == key).unwrap_or(false))
+            })
         });
         let dev = wanted.or_else(|| host.default_output_device()).ok_or("no audio output device found")?;
         let device_name = dev.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "Default".into());
+        let device_id = dev.id().map(|i| i.to_string()).unwrap_or_default();
         let supported = dev.default_output_config().map_err(|e| format!("{device_name}: {e}"))?;
         let rate = supported.sample_rate();
         let format = supported.sample_format();
@@ -494,7 +499,7 @@ impl Engine {
             };
             match built.and_then(|s| s.play().map(|_| s).map_err(|e| e.to_string())) {
                 Ok(stream) => {
-                    return Ok(Engine { _stream: stream, tx, garbage: grx, status, rate, channels, device_name });
+                    return Ok(Engine { _stream: stream, tx, garbage: grx, status, rate, channels, device_name, device_id });
                 }
                 Err(e) => last_err = e,
             }

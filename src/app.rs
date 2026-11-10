@@ -1,11 +1,11 @@
 //! The two-mode user interface: Show Mode (fire cues) and Edit Mode (configuration matrix).
 
 use crate::decode::{Clip, decode_file};
-use crate::engine::{Cmd, Engine, NONE, Plan, PlanCue, Snapshot, output_device_names};
+use crate::engine::{Cmd, Engine, NONE, Plan, PlanCue, Snapshot, output_devices};
 use crate::i18n::tr;
 use crate::update::{self, VERSION};
 use crate::project::{
-    BANKS, CUE_COUNT, CUES_PER_BANK, Cue, CueId, EXTENSION, Project, bank_letter, cue_key, next_start, parse_hhmm, today,
+    BANKS, CUE_COUNT, CUES_PER_BANK, Cue, CueId, EXTENSION, History, Project, bank_letter, cue_key, next_start, parse_hhmm, today,
 };
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Event, FontId, Key, Layout, Modifiers, Pos2, Rect, Sense, Stroke,
@@ -164,11 +164,23 @@ enum Dialog {
 
 /// One open output device and what the UI has already seen of it.
 struct Output {
-    /// Requested device (None = system default). The engine may have fallen back to the default.
+    /// Requested device id (None = system default). The engine may have fallen back to the default.
     key: Option<String>,
     engine: Engine,
     seen_starts: u64,
     seen_autostarts: u64,
+}
+
+impl Output {
+    /// Playing on the default device because the requested one was not found.
+    fn on_fallback(&self) -> bool {
+        self.key.as_ref().is_some_and(|k| *k != self.engine.device_id && *k != self.engine.device_name)
+    }
+}
+
+/// Name to show for a device id (older shows stored the name itself).
+fn device_label(devices: &[(String, String)], key: &str) -> String {
+    devices.iter().find(|(id, _)| id == key).map(|(_, name)| name.clone()).unwrap_or_else(|| key.to_string())
 }
 
 pub struct App {
@@ -193,10 +205,7 @@ pub struct App {
     midi_ports: Vec<String>,
     /// Action waiting for the next MIDI message (index into `midi::ACTIONS`).
     midi_learn: Option<usize>,
-    undo: Vec<Project>,
-    redo: Vec<Project>,
-    /// Edits closer together than this become one undo step (typing a name).
-    last_undo_push: Instant,
+    history: History,
     audio_error: Option<String>,
     last_reconnect: Instant,
     slots: Vec<Slot>,
@@ -213,7 +222,7 @@ pub struct App {
     title: String,
     keep_awake_on: bool,
     /// Cached: enumerating devices costs 8-23 ms, too slow to redo every frame.
-    devices: Vec<String>,
+    devices: Vec<(String, String)>,
     /// Set when New/Open swap the whole show this frame, so it isn't seen as an edit.
     replaced: bool,
     update: update::Shared,
@@ -240,9 +249,7 @@ impl App {
             midi_error: None,
             midi_ports: Vec::new(),
             midi_learn: None,
-            undo: Vec::new(),
-            redo: Vec::new(),
-            last_undo_push: Instant::now(),
+            history: History::default(),
             audio_error: None,
             last_reconnect: Instant::now(),
             slots: (0..CUE_COUNT)
@@ -260,7 +267,7 @@ impl App {
             allow_close: false,
             title: String::new(),
             keep_awake_on: false,
-            devices: output_device_names(),
+            devices: output_devices(),
             replaced: false,
             update: Arc::new(Mutex::new(update::State::Idle)),
             update_manual: false,
@@ -324,12 +331,9 @@ impl App {
                 Err(e) => errors.push(e),
             }
         }
-        for o in &self.outputs {
-            if let Some(k) = &o.key
-                && *k != o.engine.device_name
-            {
-                errors.push(format!("{k} : {} {}", tr("not found, playing on"), o.engine.device_name));
-            }
+        for o in self.outputs.iter().filter(|o| o.on_fallback()) {
+            let wanted = device_label(&self.devices, o.key.as_deref().unwrap_or_default());
+            errors.push(format!("{wanted} : {} {}", tr("not found, playing on"), o.engine.device_name));
         }
         self.audio_error = (!errors.is_empty()).then(|| errors.join("  ·  "));
         self.last_wanted = wanted;
@@ -564,8 +568,7 @@ impl App {
     }
 
     fn reset_show_state(&mut self) {
-        self.undo.clear();
-        self.redo.clear();
+        self.history.clear();
         self.preselect = None;
         self.armed = None;
         self.view_bank = 0;
@@ -656,7 +659,7 @@ impl App {
     /// Default output changed in Preferences: reopen every device.
     fn reopen_audio(&mut self) {
         self.outputs.clear(); // close the old streams before opening the devices again
-        self.devices = output_device_names();
+        self.devices = output_devices();
         self.ensure_outputs();
     }
 
@@ -731,8 +734,11 @@ impl App {
         if let Some(i) = started {
             self.display = i;
             let pb = &self.project.playback;
+            // A preview in Edit Mode or a spot effect played over the show must not move GO.
             if pb.auto_preselect
+                && self.mode == Mode::Show
                 && let Some(cur) = self.status().cue
+                && !self.project.cues[cur].layer
             {
                 let next = if pb.preselect_next { self.project.step(cur, true, |c| self.has_clip(c)) } else { Some(cur) };
                 if let Some(n) = next {
@@ -754,7 +760,7 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
-        let awake = self.mode == Mode::Show && self.prefs.keep_awake;
+        let awake = (self.mode == Mode::Show || self.armed.is_some()) && self.prefs.keep_awake;
         if awake != self.keep_awake_on {
             self.keep_awake_on = awake;
             crate::set_keep_awake(awake);
@@ -768,12 +774,16 @@ impl App {
     fn show_keys(&mut self, raw: &mut egui::RawInput) {
         let mut handled = Vec::new();
         for (i, ev) in raw.events.iter().enumerate() {
-            let Event::Key { key, pressed, repeat, modifiers, .. } = ev else { continue };
+            let Event::Key { key, physical_key, pressed, repeat, modifiers } = ev else { continue };
+            // Bank digits by key position: on AZERTY the 4 key types ' and egui reads it as Quote.
+            let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
+            let digit = physical_key.and_then(|p| digits.iter().position(|d| *d == p));
             if modifiers.ctrl || modifiers.command || modifiers.alt {
                 continue;
             }
             let fkeys = [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F10];
             let ours = fkeys.contains(key)
+                || digit.is_some()
                 || matches!(
                     key,
                     Key::Space
@@ -803,6 +813,10 @@ impl App {
             }
             if let Some(n) = fkeys.iter().position(|k| k == key) {
                 self.fire(self.view_bank * CUES_PER_BANK + n);
+                continue;
+            }
+            if let Some(b) = digit {
+                self.view_bank = b;
                 continue;
             }
             match key {
@@ -904,15 +918,15 @@ impl App {
     /// A bank whose card vanished plays on the default device; switch back once the card
     /// is present again and nothing plays on the fallback. Same idea for the MIDI input.
     fn recover_devices(&mut self, ctx: &egui::Context) {
-        let on_fallback = |o: &Output| o.key.as_ref().is_some_and(|k| *k != o.engine.device_name);
-        if self.outputs.iter().any(on_fallback) {
-            let names = output_device_names();
+        if self.outputs.iter().any(Output::on_fallback) {
+            let devices = output_devices();
+            let back = |k: &String| devices.iter().any(|(id, name)| id == k || name == k);
             let before = self.outputs.len();
             self.outputs.retain(|o| {
-                !(on_fallback(o) && o.key.as_ref().is_some_and(|k| names.contains(k)) && o.engine.status.snapshot().cue.is_none())
+                !(o.on_fallback() && o.key.as_ref().is_some_and(back) && o.engine.status.snapshot().cue.is_none())
             });
             if self.outputs.len() != before {
-                self.devices = names;
+                self.devices = devices;
                 self.ensure_outputs();
             }
         }
@@ -961,9 +975,9 @@ impl App {
 
     /// Step back (or forward) through the edit history.
     fn undo_redo(&mut self, forward: bool) {
-        let (from, to) = if forward { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
-        let Some(p) = from.pop() else { return };
-        to.push(std::mem::replace(&mut self.project, p));
+        if !self.history.step(&mut self.project, forward) {
+            return;
+        }
         self.project.modified = today();
         self.dirty = true;
         self.replaced = true; // not a new edit: keep it off the undo stack
@@ -1328,9 +1342,14 @@ impl App {
             (half + 10.0 + bw + 4.0, 0.0, tr("PRESL NXT"), &mut pb.auto_preselect, true, tr("Automatically preselect the next cue")),
             (half + 10.0, bh + 4.0, tr("AUTO STRT"), &mut armed, auto_start, tr("Arm the automatic start (set the time in Edit Mode)")),
         ];
+        // Show Mode is a showcase: the show's settings are lights here and change in Edit Mode.
+        // Only the automatic start can be armed live.
+        let set_in_edit = tr("(set in Edit Mode)");
         for (i, (dx, dy, label, value, enabled, tip)) in toggles.iter_mut().enumerate() {
             let r = Rect::from_min_size(pos2(full.min.x + *dx, y + *dy), vec2(bw, bh));
-            if led_button(ui, r, label, value, *enabled, ui.scope_id().with(("toggle", i))).on_hover_text(*tip).clicked() && *enabled {
+            let clickable = i == 5 && *enabled;
+            let tip = if clickable { tip.to_string() } else { format!("{tip} {set_in_edit}") };
+            if led_button(ui, r, label, value, *enabled, clickable, ui.scope_id().with(("toggle", i))).on_hover_text(tip).clicked() {
                 **value = !**value;
             }
         }
@@ -1658,10 +1677,10 @@ impl App {
                 }
             });
             ui.menu_button(tr("Project"), |ui| {
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(tr("Undo   Ctrl+Z"))).clicked() {
+                if ui.add_enabled(self.history.can_undo(), egui::Button::new(tr("Undo   Ctrl+Z"))).clicked() {
                     self.undo_redo(false);
                 }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(tr("Redo   Ctrl+Y"))).clicked() {
+                if ui.add_enabled(self.history.can_redo(), egui::Button::new(tr("Redo   Ctrl+Y"))).clicked() {
                     self.undo_redo(true);
                 }
                 ui.separator();
@@ -1683,11 +1702,11 @@ impl App {
                 ui.label(tr("Audio output"));
                 let mut choice = self.prefs.device.clone();
                 ui.radio_value(&mut choice, None, tr("System default"));
-                for name in &self.devices {
-                    ui.radio_value(&mut choice, Some(name.clone()), name.as_str());
+                for (id, name) in &self.devices {
+                    ui.radio_value(&mut choice, Some(id.clone()), name.as_str());
                 }
                 if ui.button(tr("Refresh device list")).clicked() {
-                    self.devices = output_device_names();
+                    self.devices = output_devices();
                 }
                 if choice != self.prefs.device {
                     self.prefs.device = choice;
@@ -1741,11 +1760,11 @@ impl App {
                 egui::ComboBox::from_id_salt(("out", b))
                     .width(150.0)
                     .truncate()
-                    .selected_text(bank.output.clone().unwrap_or_else(|| tr("Default").into()))
+                    .selected_text(bank.output.as_deref().map(|k| device_label(&self.devices, k)).unwrap_or_else(|| tr("Default").into()))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut bank.output, None, tr("Default"));
-                        for d in &self.devices {
-                            ui.selectable_value(&mut bank.output, Some(d.clone()), d);
+                        for (id, name) in &self.devices {
+                            ui.selectable_value(&mut bank.output, Some(id.clone()), name);
                         }
                     });
                 let pair = |c: usize| format!("{}-{}", c + 1, c + 2);
@@ -2182,14 +2201,7 @@ impl eframe::App for App {
         self.dialogs(&ctx);
 
         if !std::mem::take(&mut self.replaced) && self.project != before {
-            if self.last_undo_push.elapsed() > Duration::from_secs(1) {
-                self.undo.push(before);
-                if self.undo.len() > 200 {
-                    self.undo.remove(0);
-                }
-            }
-            self.last_undo_push = Instant::now();
-            self.redo.clear();
+            self.history.record(before, Instant::now());
             self.project.modified = today();
             self.dirty = true;
             self.sync_slots();
@@ -2261,10 +2273,11 @@ fn draw_button_bg(p: &egui::Painter, r: Rect, top: Color32, bottom: Color32, hov
     p.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.0, Color32::from_gray(0x48)), StrokeKind::Inside);
 }
 
-fn led_button(ui: &mut Ui, r: Rect, label: &str, value: &bool, enabled: bool, id: egui::Id) -> egui::Response {
-    let resp = ui.interact(r, id, if enabled { Sense::click() } else { Sense::hover() });
+/// A switch with a red light. Not `clickable`: a status light only. Not `enabled`: dimmed.
+fn led_button(ui: &mut Ui, r: Rect, label: &str, value: &bool, enabled: bool, clickable: bool, id: egui::Id) -> egui::Response {
+    let resp = ui.interact(r, id, if clickable { Sense::click() } else { Sense::hover() });
     let p = ui.painter();
-    draw_button_bg(p, r, Color32::from_gray(0x2c), Color32::from_gray(0x22), resp.hovered() && enabled);
+    draw_button_bg(p, r, Color32::from_gray(0x2c), Color32::from_gray(0x22), resp.hovered() && clickable);
     let led = Rect::from_min_size(pos2(r.max.x - 9.0, r.min.y + 3.0), vec2(6.0, r.height() - 6.0));
     p.rect_filled(led, 1.0, if *value && enabled { RED } else { Color32::from_gray(0x14) });
     p.text(pos2(r.center().x - 4.0, r.center().y), Align2::CENTER_CENTER, label, FontId::proportional(10.5), if enabled { WHITE } else { DIM });

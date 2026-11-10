@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub const BANKS: usize = 5;
 pub const CUES_PER_BANK: usize = 10;
@@ -251,6 +252,53 @@ impl Project {
 /// Beyond this, scanning would freeze the UI for too long (someone picked a whole drive).
 const MAX_INDEXED: usize = 50_000;
 
+/// Undo / redo of whole show states.
+#[derive(Default)]
+pub struct History {
+    undo: Vec<Project>,
+    redo: Vec<Project>,
+    last_edit: Option<Instant>,
+}
+
+impl History {
+    /// Edits closer together than this are one step (typing a name, dragging a marker).
+    const GROUP: Duration = Duration::from_secs(1);
+    const MAX: usize = 200;
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// `before` is the show as it was just before an edit made at `now`.
+    pub fn record(&mut self, before: Project, now: Instant) {
+        if self.last_edit.is_none_or(|t| now.duration_since(t) > Self::GROUP) {
+            self.undo.push(before);
+            if self.undo.len() > Self::MAX {
+                self.undo.remove(0);
+            }
+        }
+        self.last_edit = Some(now);
+        self.redo.clear();
+    }
+
+    /// Swap `current` with the previous (or, `forward`, the next) state. False when there is none.
+    pub fn step(&mut self, current: &mut Project, forward: bool) -> bool {
+        let (from, to) = if forward { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
+        let Some(p) = from.pop() else { return false };
+        to.push(std::mem::replace(current, p));
+        self.last_edit = None; // the next edit starts a new step
+        true
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+}
+
 /// `dir/name.ext`, or `dir/name (2).ext` if that name is taken by another file.
 fn free_name(dir: &Path, src: &Path) -> PathBuf {
     let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "audio".into());
@@ -423,6 +471,27 @@ mod tests {
         assert_eq!(q.relink(&elsewhere), Ok((1, 1)));
         assert!(q.cues[0].path.ends_with("hit.wav"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn history_groups_undoes_and_redoes() {
+        let named = |n: &str| Project { name: n.into(), ..Project::default() };
+        let t0 = Instant::now();
+        let mut h = History::default();
+        let mut cur = named("c");
+        h.record(named("a"), t0); // a -> b
+        h.record(named("b"), t0 + Duration::from_millis(400)); // b -> c, same burst
+        assert!(h.step(&mut cur, false));
+        assert_eq!(cur.name, "a", "a burst of edits is one undo step");
+        assert!(!h.step(&mut cur, false), "nothing older");
+        assert!(h.step(&mut cur, true));
+        assert_eq!(cur.name, "c");
+        h.record(named("c"), t0 + Duration::from_millis(500)); // new edit right after a redo
+        assert!(!h.can_redo(), "an edit drops the redo branch");
+        assert!(h.step(&mut cur, false));
+        assert_eq!(cur.name, "c", "an edit after undo/redo is its own step");
+        h.clear();
+        assert!(!h.can_undo() && !h.can_redo());
     }
 
     #[test]
