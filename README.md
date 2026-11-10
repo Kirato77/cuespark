@@ -39,13 +39,14 @@ RAM use is about 10 MB per minute of audio (stereo 16-bit), so a 30-minute show 
 
 ## Modes
 
-**Show Mode** is read-only, so nothing can be changed by mistake during a show:
+**Show Mode** runs the show; cues, names and notes can only be changed in Edit Mode:
 - big clock (elapsed/remaining) that turns orange 10 s and red 5 s before the end, bank total,
   progress bar, NEXT banner with the cue that GO will fire;
 - transport: Stop, Fade, Pause, previous/next preselection;
 - 10 cue buttons per bank with link brackets and a progress strip on the playing cue;
-- level meter, master volume, bank/playback switches, cue information (notes of the
-  preselected cue).
+- level meter, master volume, cue information (notes of the preselected cue);
+- bank/playback switches as live shortcuts: Link Cues, Loop Bank, Link Bank, Loop Cue,
+  automatic preselection, arming the automatic start.
 
 While it's on, Windows can't sleep or blank the screen, and quitting asks for confirmation first.
 

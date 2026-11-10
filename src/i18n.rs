@@ -62,7 +62,6 @@ const FRENCH_TEXT: &[(&str, &str)] = &[
     ("AUTO STRT", "DÉPART AUTO"),
     ("Arm the automatic start (set the time in Edit Mode)", "Armer le départ automatique (heure réglée en mode Édition)"),
     ("CUE INFORMATION", "NOTES DU CUE"),
-    ("(set in Edit Mode)", "(réglable en mode Édition)"),
     ("New", "Nouveau"),
     ("New (Ctrl+N)", "Nouveau spectacle (Ctrl+N)"),
     ("Open", "Ouvrir"),

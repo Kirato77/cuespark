@@ -1360,14 +1360,10 @@ impl App {
             (half + 10.0 + bw + 4.0, 0.0, tr("PRESL NXT"), &mut pb.auto_preselect, true, tr("Automatically preselect the next cue")),
             (half + 10.0, bh + 4.0, tr("AUTO STRT"), &mut armed, auto_start, tr("Arm the automatic start (set the time in Edit Mode)")),
         ];
-        // Show Mode is a showcase: the cue chain settings are lights here and change in Edit Mode.
-        // Live controls stay clickable: the loops and arming the automatic start.
-        let set_in_edit = tr("(set in Edit Mode)");
+        // Live shortcuts: every switch works from Show Mode too.
         for (i, (dx, dy, label, value, enabled, tip)) in toggles.iter_mut().enumerate() {
             let r = Rect::from_min_size(pos2(full.min.x + *dx, y + *dy), vec2(bw, bh));
-            let clickable = matches!(i, 1 | 3 | 5) && *enabled; // LOOP BNK, LOOP CUE, AUTO STRT
-            let tip = if clickable { tip.to_string() } else { format!("{tip} {set_in_edit}") };
-            if led_button(ui, r, label, value, *enabled, clickable, ui.scope_id().with(("toggle", i))).on_hover_text(tip).clicked() {
+            if led_button(ui, r, label, value, *enabled, ui.scope_id().with(("toggle", i))).on_hover_text(*tip).clicked() {
                 **value = !**value;
             }
         }
@@ -2297,11 +2293,11 @@ fn draw_button_bg(p: &egui::Painter, r: Rect, top: Color32, bottom: Color32, hov
     p.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.0, Color32::from_gray(0x48)), StrokeKind::Inside);
 }
 
-/// A switch with a red light. Not `clickable`: a status light only. Not `enabled`: dimmed.
-fn led_button(ui: &mut Ui, r: Rect, label: &str, value: &bool, enabled: bool, clickable: bool, id: egui::Id) -> egui::Response {
-    let resp = ui.interact(r, id, if clickable { Sense::click() } else { Sense::hover() });
+/// A switch with a red light; dimmed and inert when not `enabled`.
+fn led_button(ui: &mut Ui, r: Rect, label: &str, value: &bool, enabled: bool, id: egui::Id) -> egui::Response {
+    let resp = ui.interact(r, id, if enabled { Sense::click() } else { Sense::hover() });
     let p = ui.painter();
-    draw_button_bg(p, r, Color32::from_gray(0x2c), Color32::from_gray(0x22), resp.hovered() && clickable);
+    draw_button_bg(p, r, Color32::from_gray(0x2c), Color32::from_gray(0x22), resp.hovered() && enabled);
     let led = Rect::from_min_size(pos2(r.max.x - 9.0, r.min.y + 3.0), vec2(6.0, r.height() - 6.0));
     p.rect_filled(led, 1.0, if *value && enabled { RED } else { Color32::from_gray(0x14) });
     p.text(pos2(r.center().x - 4.0, r.center().y), Align2::CENTER_CENTER, label, FontId::proportional(10.5), if enabled { WHITE } else { DIM });
