@@ -69,7 +69,7 @@ While it's on, Windows can't sleep or blank the screen, and quitting asks for co
 | F1 … F10 | fire cue of the visible bank |
 | Space / Enter | GO: fire the preselected cue |
 | Esc | stop (with the stop fade from Preferences); press again to cut |
-| F | fade out, each cue with its own fade-out time |
+| F | fade out: the cue's own fade-out time, else the default from Preferences (3 s) |
 | P | pause / resume |
 | Up / Down | preselect previous / next cue |
 | Left / Right, 1 … 5 | change visible bank |

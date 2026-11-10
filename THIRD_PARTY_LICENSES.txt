@@ -1731,7 +1731,7 @@ insights.
 
 ================================================================================
 GNU General Public License v3.0 or later
-Used by: cuespark 0.3.0
+Used by: cuespark 0.3.1
 --------------------------------------------------------------------------------
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007

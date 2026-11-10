@@ -41,6 +41,8 @@ pub struct Prefs {
     pub device: Option<String>,
     /// Fade used by Stop / Esc. 0 = immediate (5 ms anti-click).
     pub stop_fade_ms: u32,
+    /// Fade used by FADE / F for cues without their own fade-out time.
+    pub fade_out_ms: u32,
     pub recent: Vec<PathBuf>,
     pub reopen_last: bool,
     pub keep_awake: bool,
@@ -62,7 +64,7 @@ fn full_volume() -> f32 {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { device: None, stop_fade_ms: 0, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true, master: 1.0, edit_dark: true, french: false, midi_port: None, midi_triggers: [None; 3] }
+        Self { device: None, stop_fade_ms: 0, fade_out_ms: 3000, recent: Vec::new(), reopen_last: true, keep_awake: true, check_updates: true, master: 1.0, edit_dark: true, french: false, midi_port: None, midi_triggers: [None; 3] }
     }
 }
 
@@ -475,7 +477,8 @@ impl App {
     }
 
     fn fade_out(&mut self) {
-        self.send_all(|_| Cmd::FadeOut);
+        let ms = self.prefs.fade_out_ms as u64;
+        self.send_all(|rate| Cmd::FadeOut { default_frames: (ms * rate as u64 / 1000) as u32 });
     }
 
     fn toggle_pause(&mut self) {
@@ -1101,8 +1104,8 @@ impl App {
         };
         fit_text(p, pos2(nx, y0 + 14.0), Align2::LEFT_TOP, &next, FontId::proportional(20.0), WHITE, transport_w);
         let ela = pos2(clock_rect.max.x + 8.0, clock_rect.center().y - 12.0);
-        p.text(ela, Align2::LEFT_TOP, "ELA", FontId::proportional(12.0), if self.show_remaining { DIM } else { WHITE });
-        p.text(ela + vec2(0.0, 14.0), Align2::LEFT_TOP, "REM", FontId::proportional(12.0), if self.show_remaining { WHITE } else { DIM });
+        p.text(ela, Align2::LEFT_TOP, tr("ELA"), FontId::proportional(12.0), if self.show_remaining { DIM } else { WHITE });
+        p.text(ela + vec2(0.0, 14.0), Align2::LEFT_TOP, tr("REM"), FontId::proportional(12.0), if self.show_remaining { WHITE } else { DIM });
         let toggle = Rect::from_min_size(ela - vec2(4.0, 2.0), vec2(34.0, 32.0));
         if ui.interact(toggle, ui.scope_id().with("elarem"), Sense::click()).on_hover_text(tr("Elapsed / remaining (Tab)")).clicked() {
             self.show_remaining = !self.show_remaining;
@@ -1112,10 +1115,10 @@ impl App {
         let bx = ela.x + 50.0;
         let tot = self.bank_total_ms(self.view_bank);
         let p = ui.painter();
-        p.rect_filled(Rect::from_min_size(pos2(bx, y0), vec2(64.0, 14.0)), 0.0, Color32::from_gray(0x40));
-        p.text(pos2(bx + 4.0, y0 + 1.0), Align2::LEFT_TOP, format!("BANK  {}", bank_letter(self.view_bank)), FontId::proportional(11.0), WHITE);
-        p.rect_filled(Rect::from_min_size(pos2(bx + 66.0, y0), vec2(36.0, 14.0)), 0.0, Color32::from_gray(0x28));
-        p.text(pos2(bx + 70.0, y0 + 1.0), Align2::LEFT_TOP, "TOT", FontId::proportional(11.0), GREY);
+        p.rect_filled(Rect::from_min_size(pos2(bx, y0), vec2(78.0, 14.0)), 0.0, Color32::from_gray(0x40));
+        p.text(pos2(bx + 4.0, y0 + 1.0), Align2::LEFT_TOP, format!("{}  {}", tr("BANK"), bank_letter(self.view_bank)), FontId::proportional(11.0), WHITE);
+        p.rect_filled(Rect::from_min_size(pos2(bx + 80.0, y0), vec2(36.0, 14.0)), 0.0, Color32::from_gray(0x28));
+        p.text(pos2(bx + 84.0, y0 + 1.0), Align2::LEFT_TOP, "TOT", FontId::proportional(11.0), GREY);
         for (txt, dx) in [("min", 0.0), ("sec", 26.0), ("msec", 52.0)] {
             p.text(pos2(bx + dx, y0 + 17.0), Align2::LEFT_TOP, txt, FontId::proportional(9.0), GREY);
         }
@@ -1150,7 +1153,7 @@ impl App {
         let icons = [Icon::Stop, Icon::Fade, Icon::Pause, Icon::Prev, Icon::Next];
         let tips = [
             tr("Stop (Esc, twice = cut)"),
-            tr("Fade out with each cue's fade-out time (F)"),
+            tr("Fade out: the cue's own fade-out time, else the default from Preferences (F)"),
             tr("Pause / resume (P)"),
             tr("Preselect previous cue (Up arrow)"),
             tr("Preselect next cue (Down arrow)"),
@@ -1190,7 +1193,9 @@ impl App {
             if active {
                 p.line_segment([r.left_top() + vec2(1.0, 1.0), r.right_top() + vec2(-1.0, 1.0)], Stroke::new(2.0, RED));
             }
-            let name = self.project.banks[b].label(b);
+            // Empty banks read "--", as in CueFire; others show their name or letter.
+            let used = (b * CUES_PER_BANK..(b + 1) * CUES_PER_BANK).any(|c| !self.project.cues[c].is_empty());
+            let name = if used { self.project.banks[b].label(b) } else { "--".into() };
             fit_text(p, r.center(), Align2::CENTER_CENTER, &name, FontId::proportional(12.0), if active { RED } else { WHITE }, tab_w - 10.0);
             if resp.clicked() {
                 self.view_bank = b;
@@ -1262,13 +1267,23 @@ impl App {
             let linked = bank.link_cues && cue.link;
             let stroke = Stroke::new(3.0, if linked { RED } else { DIM });
             let x0 = r.max.x + 4.0;
-            let x1 = x0 + 10.0;
             let yt = r.max.y - bh * 0.3;
-            let yb = if row == 4 { r.max.y - 2.0 } else { r.max.y + gap + bh * 0.3 };
-            p.line_segment([pos2(x0, yt), pos2(x1, yt)], stroke);
-            p.line_segment([pos2(x1, yt), pos2(x1, yb)], stroke);
-            if row != 4 {
-                p.line_segment([pos2(x0, yb), pos2(x1, yb)], stroke);
+            let path = match slot {
+                9 => vec![], // last cue of the bank: nothing follows on screen
+                4 => {
+                    // F5 -> F6: step up into the second column.
+                    let xm = r.max.x + (bracket + col_gap) / 2.0;
+                    let y6 = area.min.y + bh * 0.3;
+                    let x6 = r.max.x + bracket + col_gap - 4.0;
+                    vec![pos2(x0, yt), pos2(xm, yt), pos2(xm, y6), pos2(x6, y6)]
+                }
+                _ => {
+                    let (x1, yb) = (x0 + 10.0, r.max.y + gap + bh * 0.3);
+                    vec![pos2(x0, yt), pos2(x1, yt), pos2(x1, yb), pos2(x0, yb)]
+                }
+            };
+            if !path.is_empty() {
+                p.add(egui::Shape::line(path, stroke));
             }
 
             let tip = match slot_state {
@@ -1316,7 +1331,7 @@ impl App {
             let r = Rect::from_min_size(pos2(full.min.x + 70.0, y + i as f32 * 9.0), vec2(bar_w, 6.0));
             draw_meter(ui.painter(), r, level);
         }
-        ui.painter().text(pos2(full.min.x, y + 7.0), Align2::LEFT_CENTER, "L / R", FontId::proportional(10.0), GREY);
+        ui.painter().text(pos2(full.min.x, y + 7.0), Align2::LEFT_CENTER, tr("L / R"), FontId::proportional(10.0), GREY);
         y += 22.0;
         ui.painter().text(pos2(full.min.x, y + 9.0), Align2::LEFT_CENTER, "MASTER", FontId::proportional(10.0), GREY);
         let slider = Rect::from_min_size(pos2(full.min.x + 66.0, y), vec2(bar_w + 4.0, 18.0));
@@ -1438,7 +1453,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal_top(|ui| {
                 let w = ui.available_width();
-                ui.allocate_ui(vec2(w * 0.66, 170.0), |ui| group(ui, tr("Bank Settings"), |ui| self.bank_table(ui)));
+                ui.allocate_ui(vec2(w * 0.63, 170.0), |ui| group(ui, tr("Bank Settings"), |ui| self.bank_table(ui)));
                 ui.allocate_ui(vec2(ui.available_width(), 170.0), |ui| group(ui, tr("Playback Settings"), |ui| self.playback_box(ui)));
             });
             ui.add_space(6.0);
@@ -1529,7 +1544,7 @@ impl App {
                         .range(0.0..=dur)
                         .clamp_existing_to_range(false)
                         .speed(0.01)
-                        .custom_formatter(|v, _| if v <= 0.0 { "end".into() } else { format!("{v:.3} s") }),
+                        .custom_formatter(|v, _| if v <= 0.0 { tr("end").into() } else { format!("{v:.3} s") }),
                 );
                 if ui.small_button(tr("Reset")).on_hover_text(tr("Play the whole file")).clicked() {
                     (cue.start, cue.end) = (0.0, 0.0);
@@ -1585,10 +1600,9 @@ impl App {
         let shade = Color32::from_black_alpha(170);
         p.rect_filled(Rect::from_min_max(rect.min, pos2(x_of(cue.start), rect.max.y)), 0.0, shade);
         p.rect_filled(Rect::from_min_max(pos2(x_of(end), rect.min.y), rect.max), 0.0, shade);
-        for (t, label, align) in [(cue.start, "IN", Align2::LEFT_TOP), (end, "OUT", Align2::RIGHT_TOP)] {
+        for (t, label, align, dx) in [(cue.start, tr("IN"), Align2::LEFT_TOP, 4.0), (end, tr("OUT"), Align2::RIGHT_TOP, -4.0)] {
             let x = x_of(t).clamp(rect.left() + 1.0, rect.right() - 1.0);
             p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(2.0, RED));
-            let dx = if label == "IN" { 4.0 } else { -4.0 };
             p.text(pos2(x + dx, rect.top() + 2.0), align, label, FontId::proportional(10.0), RED);
         }
         resp.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
@@ -1717,6 +1731,11 @@ impl App {
                     ui.label(tr("Stop fade (Esc)"));
                     ui.add(egui::DragValue::new(&mut self.prefs.stop_fade_ms).range(0..=10_000).suffix(" ms").speed(10));
                 });
+                ui.horizontal(|ui| {
+                    ui.label(tr("Default fade-out (F)"));
+                    ui.add(egui::DragValue::new(&mut self.prefs.fade_out_ms).range(100..=30_000).suffix(" ms").speed(50))
+                        .on_hover_text(tr("For cues without their own fade-out time"));
+                });
                 ui.checkbox(&mut self.prefs.keep_awake, tr("Keep screen awake in Show Mode"));
                 ui.checkbox(&mut self.prefs.check_updates, tr("Check for updates at startup"));
                 ui.checkbox(&mut self.prefs.edit_dark, tr("Dark Edit Mode"));
@@ -1756,9 +1775,10 @@ impl App {
                 ui.checkbox(&mut bank.link_cues, "");
                 ui.checkbox(&mut bank.link_bank, "");
                 ui.checkbox(&mut bank.loop_bank, "");
-                ui.add(egui::TextEdit::singleline(&mut bank.name).desired_width(120.0).hint_text(format!("{} {}", tr("Bank"), bank_letter(b))));
+                // Fixed size: inside the grid a TextEdit shrinks to its text otherwise.
+                ui.add_sized([96.0, 20.0], egui::TextEdit::singleline(&mut bank.name).hint_text(bank_letter(b).to_string()));
                 egui::ComboBox::from_id_salt(("out", b))
-                    .width(150.0)
+                    .width(120.0)
                     .truncate()
                     .selected_text(bank.output.as_deref().map(|k| device_label(&self.devices, k)).unwrap_or_else(|| tr("Default").into()))
                     .show_ui(ui, |ui| {
@@ -1901,7 +1921,7 @@ impl App {
                         ui.label(ext);
                     });
                     row.col(|ui| {
-                        if ui.small_button("RESET").on_hover_text(tr("Clear this cue (Del)")).clicked() {
+                        if ui.small_button(tr("RESET")).on_hover_text(tr("Clear this cue (Del)")).clicked() {
                             reset = Some(c);
                         }
                     });
@@ -1946,41 +1966,41 @@ impl App {
         let frame = egui::Frame::new()
             .fill(if dark { BLACK } else { Color32::from_gray(0xe4) })
             .inner_margin(egui::Margin::symmetric(10, 3));
+        let text = if dark { WHITE } else { Color32::from_gray(0x20) };
         egui::Panel::bottom("status").frame(frame).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let text = if dark { WHITE } else { Color32::from_gray(0x20) };
-                ui.label(egui::RichText::new(if show { tr("Show Mode is active") } else { tr("Edit Mode is active") }).color(text));
-                ui.separator();
-                if let Some(err) = &self.audio_error {
-                    ui.label(egui::RichText::new(format!("AUDIO: {err}")).color(Color32::from_rgb(0xff, 0x50, 0x50)).strong());
-                } else {
+            // Right side first; the left side (long paths, errors) gets what is left and ends in "…".
+            egui::Sides::new().shrink_left().truncate().show(
+                ui,
+                |ui| {
+                    ui.label(egui::RichText::new(if show { tr("Show Mode is active") } else { tr("Edit Mode is active") }).color(text));
+                    ui.separator();
                     let loading = self.slots.iter().filter(|s| matches!(s.state, SlotState::Loading)).count();
                     let failed = self.slots.iter().filter(|s| matches!(s.state, SlotState::Failed(_))).count();
-                    if let Some(e) = &self.midi_error {
+                    if let Some(err) = &self.audio_error {
+                        ui.label(egui::RichText::new(format!("AUDIO: {err}")).color(Color32::from_rgb(0xff, 0x50, 0x50)).strong());
+                    } else if let Some(e) = &self.midi_error {
                         ui.label(egui::RichText::new(e).color(ORANGE));
                     } else if loading > 0 {
-                        ui.label(egui::RichText::new(format!("{}: {loading}…", tr("Loading clips"))).color(Color32::from_rgb(0xe0, 0xa0, 0x20)));
+                        ui.label(egui::RichText::new(format!("{} {loading}…", tr("Loading clips:"))).color(Color32::from_rgb(0xe0, 0xa0, 0x20)));
                     } else if failed > 0 {
-                        ui.label(egui::RichText::new(format!("{}: {failed}", tr("Missing or unreadable clips"))).color(Color32::from_rgb(0xff, 0x70, 0x30)));
+                        ui.label(egui::RichText::new(format!("{} {failed}", tr("Missing or unreadable clips:"))).color(Color32::from_rgb(0xff, 0x70, 0x30)));
                     } else if let Some(c) = snap.cue.or(self.preselect) {
-                        // Leave room for the project name on the right; long paths end in "…".
-                        ui.set_max_width(ui.available_width() - 260.0);
-                        ui.add(egui::Label::new(egui::RichText::new(&self.project.cues[c].path).color(text)).truncate());
+                        ui.label(egui::RichText::new(&self.project.cues[c].path).color(text)).on_hover_text(&self.project.cues[c].path);
                     }
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                },
+                |ui| {
                     if !show {
                         ui.label(egui::RichText::new(format!("v{VERSION}")).color(Color32::from_gray(0x80)));
                         ui.separator();
                     }
                     let name = format!("{}{}", self.project.name, if self.dirty { " *" } else { "" });
                     ui.label(egui::RichText::new(name).color(text));
-                    ui.separator();
                     if self.armed.is_some() {
+                        ui.separator();
                         ui.label(egui::RichText::new(format!("{} {}", tr("AUTO START in"), self.to_go())).color(RED).strong());
                     }
-                });
-            });
+                },
+            );
         });
     }
 
@@ -2155,7 +2175,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1 … F10", "Fire cue of the visible bank"),
     ("Space / Enter", "GO: fire the preselected cue"),
     ("Esc", "Stop (with the stop fade). Twice: cut now"),
-    ("F", "Fade out (each cue's own fade-out time)"),
+    ("F", "Fade out (the cue's fade-out time, else the default)"),
     ("P", "Pause / resume"),
     ("Up / Down arrows", "Preselect previous / next cue"),
     ("Left / Right, 1 … 5", "Show previous / next bank, or bank A … E"),
@@ -2300,7 +2320,7 @@ fn draw_icon(p: &egui::Painter, c: Pos2, icon: Icon, color: Color32) {
             p.rect_filled(Rect::from_center_size(c, Vec2::splat(2.0 * s)), 0.0, color);
         }
         Icon::Fade => {
-            p.text(c, Align2::CENTER_CENTER, "FADE", FontId::proportional(15.0), color);
+            p.text(c, Align2::CENTER_CENTER, tr("FADE"), FontId::proportional(15.0), color);
         }
         Icon::Pause => {
             p.rect_filled(Rect::from_center_size(c - vec2(5.0, 0.0), vec2(5.0, 2.0 * s)), 0.0, color);

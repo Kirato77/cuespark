@@ -48,8 +48,8 @@ pub enum Cmd {
     Fire(CueId),
     /// Fade out everything playing. Sent while fades are running, it cuts at once.
     Stop { fade_frames: u32 },
-    /// Fade out everything playing, each cue with its own fade-out time.
-    FadeOut,
+    /// Fade out everything playing, each cue with its own fade-out time, or this one if it has none.
+    FadeOut { default_frames: u32 },
     /// Silence this device now (a cue that replaces everything started on another device).
     Cut,
     TogglePause,
@@ -324,7 +324,7 @@ impl Mixer {
                     self.fade_all(|_| fade_frames);
                 }
             }
-            Cmd::FadeOut => self.fade_all(|v| v.fade_out),
+            Cmd::FadeOut { default_frames } => self.fade_all(|v| if v.fade_out > 0 { v.fade_out } else { default_frames }),
             Cmd::Cut => {
                 let d = self.declick;
                 self.fade_all(|_| d);
@@ -707,13 +707,25 @@ mod tests {
         assert!((out[50] - 0.125).abs() < 0.01, "half way through the fade-in: {}", out[50]);
         assert!((out[120] - 0.25).abs() < 1e-3, "gain 0.5 of 0.5");
         assert_eq!(st.snapshot().len, 400, "length is the in/out range");
-        tx.push(Cmd::FadeOut).ok();
+        tx.push(Cmd::FadeOut { default_frames: 50 }).ok();
         let out = run(&mut m, 300);
-        assert!((out[100] - 0.125).abs() < 0.01, "own fade-out time: {}", out[100]);
+        assert!((out[100] - 0.125).abs() < 0.01, "own fade-out time wins: {}", out[100]);
         assert_eq!(out[250], 0.0);
         tx.push(Cmd::Fire(0)).ok();
         run(&mut m, 500);
         assert_eq!(st.snapshot().cue, None, "stops at the out point (400 frames)");
+    }
+
+    #[test]
+    fn fade_out_uses_the_default_when_the_cue_has_none() {
+        let (mut m, mut tx, _g, _st) = rig();
+        tx.push(Cmd::SetPlan(plan(vec![(0, cue(clip(10_000, 16384)))], false))).ok();
+        tx.push(Cmd::Fire(0)).ok();
+        run(&mut m, 10);
+        tx.push(Cmd::FadeOut { default_frames: 1000 }).ok();
+        let out = run(&mut m, 1100);
+        assert!((out[500] - 0.25).abs() < 0.01, "half way down a 1 s fade: {}", out[500]);
+        assert_eq!(out[1050], 0.0);
     }
 
     #[test]

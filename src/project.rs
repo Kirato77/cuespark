@@ -34,10 +34,10 @@ pub struct Bank {
 }
 
 impl Bank {
-    /// Name shown on tabs: unnamed banks read "Bank D", not "--".
+    /// Name to show: an unnamed bank goes by its letter.
     pub fn label(&self, index: usize) -> String {
         match self.name.trim() {
-            "" | "--" => format!("{} {}", crate::i18n::tr("Bank"), bank_letter(index)),
+            "" | "--" => bank_letter(index).to_string(),
             n => n.to_string(),
         }
     }
