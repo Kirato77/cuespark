@@ -6,7 +6,7 @@ Instant playback of show sound cues for theatre and live events. It follows the
 workflow of CueFire FREE (discontinued, does not run on Windows 11):
 two modes, 5 banks of 10 cues on F1–F10, automatic preselection, linked cues.
 
-Windows 11 first, Linux too.
+Windows 11 first, Linux too. English or French interface (Preferences → Language).
 
 ## Download
 
@@ -39,15 +39,28 @@ RAM use is about 10 MB per minute of audio (stereo 16-bit), so a 30-minute show 
 
 ## Modes
 
-**Show Mode**: big clock (elapsed/remaining), bank total, progress bar, transport,
-10 cue buttons per bank with link brackets, bank/playback switches, cue information
-(notes of the preselected cue). While it's on, Windows can't sleep or blank the screen, and
-quitting asks for confirmation first.
+**Show Mode** is read-only, so nothing can be changed by mistake during a show:
+- big clock (elapsed/remaining) that turns orange 10 s and red 5 s before the end, bank total,
+  progress bar, NEXT banner with the cue that GO will fire;
+- transport: Stop, Fade, Pause, previous/next preselection;
+- 10 cue buttons per bank with link brackets and a progress strip on the playing cue;
+- level meter, master volume, bank/playback switches, cue information (notes of the
+  preselected cue).
 
-**Edit Mode** (Configuration Matrix): bank settings (Link Cues, Link Bank, Loop Bank, name,
-length), playback settings (automatic preselection next/current, automatic start at a
-wall-clock time), cue table (link, name, file, length, size, type, reset), notes, move up/down.
-Drag audio files onto the table to fill cues from the row under the mouse.
+While it's on, Windows can't sleep or blank the screen, and quitting asks for confirmation first.
+
+**Edit Mode** (Configuration Matrix):
+- banks: Link Cues, Link Bank, Loop Bank, name, **output device and stereo pair** (several sound
+  cards at once), length;
+- playback: automatic preselection (next/current), automatic start at a wall-clock time;
+- cue table: link, name, file, length, size, type, reset; drag audio files onto it to fill
+  cues from the row under the mouse;
+- selected cue: volume (dB), fade in, fade out, *play over other cues*, in/out points dragged on
+  the waveform, notes;
+- undo/redo, collect all audio into the show folder, find missing files, export the cue list
+  (printable page or CSV);
+- MIDI remote: learn a pad, key or pedal for GO, Stop and Fade out (Preferences → MIDI remote);
+- dark (default) or light theme.
 
 ## Keys
 
@@ -56,6 +69,7 @@ Drag audio files onto the table to fill cues from the row under the mouse.
 | F1 … F10 | fire cue of the visible bank |
 | Space / Enter | GO: fire the preselected cue |
 | Esc | stop (with the stop fade from Preferences); press again to cut |
+| F | fade out, each cue with its own fade-out time |
 | P | pause / resume |
 | Up / Down | preselect previous / next cue |
 | Left / Right, 1 … 5 | change visible bank |
@@ -67,6 +81,7 @@ Drag audio files onto the table to fill cues from the row under the mouse.
 | Enter / double-click | preview the selected cue |
 | Del | clear the selected cue |
 | Alt+Up / Alt+Down | move the selected cue |
+| Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+N / O / S, Ctrl+Shift+S | new / open / save / save as |
 
 Ctrl+E switches modes.
@@ -76,7 +91,11 @@ Ctrl+E switches modes.
 A cue starts the next one when it ends if the bank's **Link Cues** is on *and* the cue's
 **Link** box is ticked. At the end of a bank, **Loop Bank** goes back to the bank's first cue,
 **Link Bank** continues with the next bank. **Loop Cue** repeats the playing cue. Linked cues
-follow on the very next sample, with no gap.
+follow on the very next sample, with no gap (on the same output device; across devices the
+UI starts the follower within a frame).
+
+A new cue replaces what is playing (a 5 ms anti-click fade), on every device, unless it is set to
+*play over other cues*.
 
 ## Show files
 
@@ -115,11 +134,11 @@ Needs `gh` (logged in), `cargo-zigbuild` and `cargo-about` (`cargo install cargo
 
 ## Known limits
 
-- One output device for the whole show (Preferences → Audio output), no per-bank output.
-- No ASIO; WASAPI shared mode on Windows.
-- No per-cue volume or fade-in; Stop can fade out.
+- WASAPI shared mode on Windows, no ASIO yet: the ASIO SDK is now GPLv3-compatible, but its
+  Rust binding only builds with the MSVC toolchain, not with this cross-compiled MinGW build.
 - Surround files: only front L/R are played.
 - Screen keep-awake is Windows-only.
+- The exe is not code-signed (SmartScreen warning on first run).
 
 ## License
 
